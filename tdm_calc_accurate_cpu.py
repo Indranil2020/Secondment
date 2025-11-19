@@ -106,6 +106,7 @@ PAIR_CONTRIBUTION_CUTOFF = 0.05
 # Generate cube files for ground state charge density and electrostatic potential
 GENERATE_GROUND_STATE_DENSITY = True
 GENERATE_ELECTROSTATIC_POTENTIAL = True
+GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
 OUTPUT_DIR = 'output_cpu_charge-1'
@@ -271,7 +272,7 @@ print(f"Ground state energy: {mf.e_tot:.6f} a.u.")
 # 2A. GROUND STATE DENSITY AND ELECTROSTATIC POTENTIAL
 # ============================================================================
 
-if GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTENTIAL:
+if GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTENTIAL or GENERATE_DEFORMATION_DENSITY:
     print("\n" + "="*70)
     print("GROUND STATE DENSITY AND POTENTIAL")
     print("="*70)
@@ -355,6 +356,86 @@ if GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTENTIAL:
             print(f"      - Reaction sites and molecular recognition")
         except Exception as e:
             print(f"  ✗ Failed to generate ESP cube: {str(e)}")
+    
+    # Generate deformation density (SCF density - Promolecule density)
+    if GENERATE_DEFORMATION_DENSITY:
+        print(f"\nGenerating deformation density...")
+        print(f"  Deformation density = SCF density - Promolecule density")
+        print(f"  Shows charge redistribution due to chemical bonding")
+        
+        try:
+            # Get promolecule density (superposition of atomic densities)
+            # This is the non-interacting atomic density (no electron-electron interaction)
+            if SPIN == 0:
+                # RKS: use scf.hf.init_guess_by_atom
+                from pyscf import scf as pyscf_scf
+                dm_promol = pyscf_scf.hf.init_guess_by_atom(mol)
+                dm_promol = np.asarray(dm_promol, dtype=np.float64)
+                
+                print(f"  System: RKS (closed-shell)")
+                print(f"  Promolecule electrons: {np.trace(dm_promol).item():.2f}")
+            else:
+                # UKS: use scf.uhf.init_guess_by_atom
+                from pyscf import scf as pyscf_scf
+                dm_promol = pyscf_scf.uhf.init_guess_by_atom(mol)
+                
+                # Handle both tuple and array formats
+                if isinstance(dm_promol, tuple):
+                    dm_promol_alpha, dm_promol_beta = dm_promol
+                    dm_promol_alpha = np.asarray(dm_promol_alpha, dtype=np.float64)
+                    dm_promol_beta = np.asarray(dm_promol_beta, dtype=np.float64)
+                    dm_promol_total = dm_promol_alpha + dm_promol_beta
+                elif dm_promol.ndim == 3 and dm_promol.shape[0] == 2:
+                    dm_promol = np.asarray(dm_promol, dtype=np.float64)
+                    dm_promol_alpha = dm_promol[0]
+                    dm_promol_beta = dm_promol[1]
+                    dm_promol_total = dm_promol_alpha + dm_promol_beta
+                else:
+                    raise ValueError(f"Unexpected promolecule density format: {type(dm_promol)}, shape: {dm_promol.shape if hasattr(dm_promol, 'shape') else 'N/A'}")
+                
+                print(f"  System: UKS (open-shell)")
+                print(f"  Promolecule alpha electrons: {np.trace(dm_promol_alpha).item():.2f}")
+                print(f"  Promolecule beta electrons: {np.trace(dm_promol_beta).item():.2f}")
+                print(f"  Promolecule total electrons: {np.trace(dm_promol_total).item():.2f}")
+                
+                dm_promol = dm_promol_total
+            
+            # Calculate deformation density
+            deformation_density = dm_total - dm_promol
+            
+            # Verify shapes match
+            if deformation_density.shape != (nao, nao):
+                raise ValueError(f"Deformation density shape {deformation_density.shape} doesn't match AO basis {nao}x{nao}")
+            
+            # Calculate deformation integral (should be close to 0)
+            deformation_integral = np.trace(deformation_density).item()
+            max_deformation = np.max(np.abs(deformation_density))
+            
+            print(f"  Deformation integral: {deformation_integral:.6f} (should be ~0)")
+            print(f"  Max |deformation|: {max_deformation:.6f}")
+            
+            # Save cube files
+            scf_density_file = os.path.join(OUTPUT_DIR, 'scf_density.cube')
+            promol_density_file = os.path.join(OUTPUT_DIR, 'promolecule_density.cube')
+            deform_density_file = os.path.join(OUTPUT_DIR, 'deformation_density.cube')
+            
+            cubegen.density(mol, scf_density_file, dm_total)
+            print(f"  ✓ SCF density: {scf_density_file}")
+            
+            cubegen.density(mol, promol_density_file, dm_promol)
+            print(f"  ✓ Promolecule density: {promol_density_file}")
+            
+            cubegen.density(mol, deform_density_file, deformation_density)
+            print(f"  ✓ Deformation density: {deform_density_file}")
+            
+            print(f"  Interpretation:")
+            print(f"    - Positive regions (red): electron accumulation (bonding)")
+            print(f"    - Negative regions (blue): electron depletion (atomic cores)")
+            
+        except Exception as e:
+            print(f"  ✗ Failed to generate deformation density: {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     print("="*70)
 
@@ -724,14 +805,29 @@ def calculate_pair_transition_density(mf, occ_idx, vir_idx):
     """
     mo_coeff = mf.mo_coeff
     
+    # Ensure we have NumPy array
+    mo_coeff = np.asarray(mo_coeff)
+    
     # Handle UKS (use alpha spin)
+    # UKS can be: tuple (dm_alpha, dm_beta) OR array with shape (2, nao, nmo)
     if isinstance(mo_coeff, tuple):
         mo_coeff_alpha = mo_coeff[0]
+    elif mo_coeff.ndim == 3 and mo_coeff.shape[0] == 2:
+        # Modern PySCF UKS format: (2, nao, nmo)
+        mo_coeff_alpha = mo_coeff[0]
     else:
+        # RKS: single 2D array
         mo_coeff_alpha = mo_coeff
     
-    # Ensure we have NumPy array
+    # Ensure alpha coefficients are 2D
     mo_coeff_alpha = np.asarray(mo_coeff_alpha)
+    if mo_coeff_alpha.ndim != 2:
+        raise ValueError(f"mo_coeff_alpha must be 2D, got shape {mo_coeff_alpha.shape}, ndim={mo_coeff_alpha.ndim}")
+    
+    # Check if indices are valid
+    nao, nmo = mo_coeff_alpha.shape
+    if occ_idx >= nmo or vir_idx >= nmo:
+        raise IndexError(f"Orbital indices out of range: occ_idx={occ_idx}, vir_idx={vir_idx}, but only {nmo} MOs available (nao={nao})")
     
     # Extract specific orbitals
     occ_mo = mo_coeff_alpha[:, occ_idx]

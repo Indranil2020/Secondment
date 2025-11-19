@@ -67,6 +67,7 @@ PAIR_CONTRIBUTION_CUTOFF=0.05       # Only generate cubes for pairs > 5%
 # --- Ground State Density and Potential ---
 GENERATE_GROUND_STATE_DENSITY=True      # Generate ground state charge density cube
 GENERATE_ELECTROSTATIC_POTENTIAL=True   # Generate electrostatic potential (ESP) cube
+GENERATE_DEFORMATION_DENSITY=True       # Generate deformation density (SCF - Promolecule)
 
 # --- Parallel Settings ---
 NUM_THREADS=0                   # Number of CPU threads (0=auto-detect)
@@ -76,8 +77,8 @@ NUM_THREADS=0                   # Number of CPU threads (0=auto-detect)
 # ============================================================================
 
 # --- CPU or GPU Selection ---
-# USE_GPU=True
-USE_GPU=False
+USE_GPU=True
+# USE_GPU=False
 
 # --- Output Control ---
 LOG_FILE="calculation.log"      # Log file name (auto-generated with timestamp)
@@ -184,6 +185,7 @@ updates = {
     'PAIR_CONTRIBUTION_CUTOFF': '${PAIR_CONTRIBUTION_CUTOFF}',
     'GENERATE_GROUND_STATE_DENSITY': '${GENERATE_GROUND_STATE_DENSITY}',
     'GENERATE_ELECTROSTATIC_POTENTIAL': '${GENERATE_ELECTROSTATIC_POTENTIAL}',
+    'GENERATE_DEFORMATION_DENSITY': '${GENERATE_DEFORMATION_DENSITY}',
     'NUM_THREADS': '${NUM_THREADS}',
     'OUTPUT_DIR': "'${OUTPUT_DIR}'",
 }
