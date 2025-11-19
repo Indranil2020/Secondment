@@ -1,0 +1,26 @@
+Loading data from molden type file nto_state_1.molden
+
+
+Setting up the grid...
+	x[0] = -5.00 x[-1] = 5.00 Nx = 21 dx = 0.500
+	y[0] = -6.50 y[-1] = 6.50 Ny = 27 dy = 0.500
+	z[0] = -6.08 z[-1] = 5.42 Nz = 24 dz = 0.500
+
+
+Processing molecular orbital list...
+	Line 1: homo-1:lumo+2
+
+
+The following orbitals will be considered...
+	Line 1: []
+
+Converting the regular grid to a vector grid containing 1.36e+04 grid points...
+
+Starting the calculation of the molecular orbitals...
+The grid has been separated into 2 slices each having 1.00e+04 grid points.
+The calculation will be carried out using only one process.
+
+	The number of subprocesses can be changed with -p
+
+
+There are 13 contracted spherical AOs and 0 MOs to be calculated.

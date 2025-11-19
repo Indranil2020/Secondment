@@ -1,0 +1,39 @@
+Loading data from molden type file nto_state_1.molden
+
+
+Setting up the grid...
+	x[0] = -5.00 x[-1] = 5.00 Nx = 21 dx = 0.500
+	y[0] = -6.50 y[-1] = 6.50 Ny = 27 dy = 0.500
+	z[0] = -6.08 z[-1] = 5.42 Nz = 24 dz = 0.500
+
+Converting the regular grid to a vector grid containing 1.36e+04 grid points...
+
+Starting the calculation of the density...
+The grid has been separated into 2 slices each having 1.00e+04 grid points.
+The calculation will be carried out using only one process.
+
+	The number of subprocesses can be changed with -p
+
+
+There are 13 contracted spherical AOs and 5 MOs to be calculated.
+	Finished 50 % (2 slices in 0.007 s)
+Converting the output from a vector grid to a regular grid...
+
+Norm of the MOs:
+	0.397397	MO 1.A (Occ = 1.00, E = +nan E_h)
+	0.287211	MO 2.A (Occ = 1.00, E = +nan E_h)
+	0.497659	MO 3.A (Occ = 1.00, E = +nan E_h)
+	0.515957	MO 4.A (Occ = 1.00, E = +nan E_h)
+	1.098857	MO 5.A (Occ = 1.00, E = +nan E_h)
+We have 2.7970799785466838 electrons.
+
+Saving to cube file...
+	vis/h2o.cube
+
+Creating VMD network file...
+	vis/h2o.vmd
+
+The calculation took 0.032s
+and required 49.16 MB of RAM.
+
+Thank you. Good bye.

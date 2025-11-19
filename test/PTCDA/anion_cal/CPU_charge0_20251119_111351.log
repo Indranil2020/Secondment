@@ -1,0 +1,273 @@
+
+Parallel computation enabled: 12 threads (auto-detected)
+
+======================================================================
+MOLECULE SETUP
+======================================================================
+Loading molecule from: H2O.xyz
+Basis set: 6-31g
+Charge: 0
+Number of atoms: 3
+Number of electrons: 10
+Number of basis functions: 13
+Molecular charge: 0
+Spin multiplicity (2S+1): 1
+Number of unpaired electrons (2S): 0
+System type: Closed-shell (singlet)
+DFT method: RKS
+
+======================================================================
+GROUND STATE DFT CALCULATION
+======================================================================
+XC functional: b3lyp
+Basis set: 6-31g
+Method: RKS
+✓ SCF converged
+Ground state energy: -76.384951 a.u.
+
+======================================================================
+GROUND STATE DENSITY AND POTENTIAL
+======================================================================
+System type: RKS (closed-shell)
+Total electrons: 6.79
+Molecular charge: 0
+Expected electrons: 10
+
+Generating ground state charge density...
+  ✓ Ground state density: output_cpu_charge0/ground_state_density.cube
+    Use this to visualize total electron distribution
+
+Generating electrostatic potential (ESP)...
+  ✓ Electrostatic potential: output_cpu_charge0/electrostatic_potential.cube
+    Use this to identify:
+      - Nucleophilic sites (negative ESP, red)
+      - Electrophilic sites (positive ESP, blue)
+      - Reaction sites and molecular recognition
+======================================================================
+
+======================================================================
+TDDFT CALCULATION
+======================================================================
+Note: TDDFT inherits XC functional (b3lyp) and basis set (6-31g) from ground state
+TDDFT method: TDDFT (RKS-based)
+Using full TDDFT - more accurate but slower
+Calculating 10 excited states...
+✓ TDDFT converged (all states)
+
+======================================================================
+EXCITED STATE ENERGIES
+======================================================================
+State 1: 0.287426 a.u. = 7.821 eV
+State 2: 0.364510 a.u. = 9.919 eV
+State 3: 0.366018 a.u. = 9.960 eV
+State 4: 0.455008 a.u. = 12.381 eV
+State 5: 0.542621 a.u. = 14.765 eV
+State 6: 0.668609 a.u. = 18.194 eV
+State 7: 1.020966 a.u. = 27.782 eV
+State 8: 1.034868 a.u. = 28.160 eV
+State 9: 1.071302 a.u. = 29.151 eV
+State 10: 1.106321 a.u. = 30.104 eV
+======================================================================
+
+======================================================================
+TRANSITION DIPOLE MOMENTS
+======================================================================
+
+Transition dipole moments (a.u.):
+State    μ_x          μ_y          μ_z          |μ|          f           
+----------------------------------------------------------------------
+1           0.122665    0.000000   -0.000000    0.122665    0.002883
+2          -0.000000    0.000000    0.314529    0.314529    0.024040
+3           0.000000    0.000000   -0.000000    0.000000    0.000000
+4          -0.000000    0.268094   -0.000000    0.268094    0.021802
+5          -0.000000    0.533510   -0.000000    0.533510    0.102965
+6          -0.000000   -0.000000   -0.367588    0.367588    0.060229
+7           0.000000    0.000000   -0.000000    0.000000    0.000000
+8           0.000000    0.000000   -0.077688    0.077688    0.004164
+9          -0.174618   -0.000000    0.000000    0.174618    0.021777
+10          0.000000   -0.224114    0.000000    0.224114    0.037045
+======================================================================
+
+======================================================================
+NATURAL TRANSITION ORBITAL ANALYSIS
+======================================================================
+
+State 1 (7.821 eV):
+  NTO orbitals saved to: output_cpu_charge0/nto_state_1.molden
+
+State 2 (9.919 eV):
+  NTO orbitals saved to: output_cpu_charge0/nto_state_2.molden
+
+State 3 (9.960 eV):
+  NTO orbitals saved to: output_cpu_charge0/nto_state_3.molden
+======================================================================
+
+======================================================================
+TRANSITION CONTRIBUTION ANALYSIS
+======================================================================
+Analyzing orbital pair contributions to excited states...
+
+======================================================================
+STATE 1: 7.8211 eV
+======================================================================
+Rank   Transition           Weight       Percentage   Cumulative  
+----------------------------------------------------------------------
+1      HOMO → LUMO          1.000000     100.00      % 100.00      %
+----------------------------------------------------------------------
+Total weight analyzed: 0.964436
+
+======================================================================
+STATE 2: 9.9187 eV
+======================================================================
+Rank   Transition           Weight       Percentage   Cumulative  
+----------------------------------------------------------------------
+1      HOMO-1 → LUMO        0.983158     98.32       % 98.32       %
+2      HOMO-2 → LUMO+1      0.016842     1.68        % 100.00      %
+----------------------------------------------------------------------
+Total weight analyzed: 0.962473
+
+======================================================================
+STATE 3: 9.9597 eV
+======================================================================
+Rank   Transition           Weight       Percentage   Cumulative  
+----------------------------------------------------------------------
+1      HOMO → LUMO+1        1.000000     100.00      % 100.00      %
+----------------------------------------------------------------------
+Total weight analyzed: 0.985059
+
+✓ Contribution tables saved to: output_cpu_charge0/contribution_tables.txt
+
+======================================================================
+GENERATING ORBITAL PAIR TRANSITION DENSITY CUBE FILES
+======================================================================
+Note: Cube files will be generated after grid parameters are calculated
+      (see CUBE FILE GENERATION section below)
+======================================================================
+
+======================================================================
+GRID PARAMETERS
+======================================================================
+Using box dimensions with margin: 4.0 Å
+Grid spacing: 0.2 Å
+Calculated grid resolution: 40 × 48 × 43
+Total grid points: 82,560
+Box size: [8.         9.5143994  8.58649977] Å
+======================================================================
+
+======================================================================
+GENERATING HOMO/LUMO CUBE FILES
+======================================================================
+HOMO index: 4
+LUMO index: 5
+HOMO energy: -7.955 eV
+LUMO energy: 1.562 eV
+HOMO-LUMO gap: 9.516 eV
+
+  ✓ HOMO orbital: output_cpu_charge0/HOMO.cube
+  ✓ LUMO orbital: output_cpu_charge0/LUMO.cube
+  ✓ HOMO-1 orbital: output_cpu_charge0/HOMO-1.cube
+  ✓ LUMO+1 orbital: output_cpu_charge0/LUMO+1.cube
+
+Verification tip:
+For the first excited state (S1), check if the transition density
+resembles a HOMO→LUMO transition by comparing:
+  - transition_density_state1.cube
+  - HOMO.cube (electron depletion)
+  - LUMO.cube (electron accumulation)
+
+----------------------------------------------------------------------
+ANALYTICAL VERIFICATION: HOMO→LUMO Transition Density
+----------------------------------------------------------------------
+  ✓ Analytical HOMO→LUMO transition: output_cpu_charge0/transition_HOMO_LUMO_analytical.cube
+
+To verify S1 is a HOMO→LUMO transition, compare:
+  1. output_cpu_charge0/transition_density_state1.cube
+  2. output_cpu_charge0/transition_HOMO_LUMO_analytical.cube
+
+They should be very similar if S1 is dominated by HOMO→LUMO excitation.
+You can calculate the overlap/similarity in VMD or by visual inspection.
+======================================================================
+
+======================================================================
+GENERATING EXCITED STATE CUBE FILES
+======================================================================
+Generating cube files for states: [1, 2, 3]
+Grid resolution: 40 × 48 × 43
+
+State 1: 7.821 eV
+  ✓ Transition density: output_cpu_charge0/transition_density_state1.cube
+  ✓ Excited state density: output_cpu_charge0/excited_state_density_state1.cube
+  ✓ Density difference: output_cpu_charge0/density_difference_state1.cube
+
+  ------------------------------------------------------------------
+  QUANTITATIVE VERIFICATION: S1 vs HOMO→LUMO
+  ------------------------------------------------------------------
+  Similarity (cosine): -0.9997
+  HOMO→LUMO weight: 0.9992 (99.9%)
+  HOMO→LUMO amplitude: 0.9821
+  ⚠ S1 is NOT a pure HOMO→LUMO transition (multi-configurational)
+  ------------------------------------------------------------------
+
+State 2: 9.919 eV
+  ✓ Transition density: output_cpu_charge0/transition_density_state2.cube
+  ✓ Excited state density: output_cpu_charge0/excited_state_density_state2.cube
+  ✓ Density difference: output_cpu_charge0/density_difference_state2.cube
+
+State 3: 9.960 eV
+  ✓ Transition density: output_cpu_charge0/transition_density_state3.cube
+  ✓ Excited state density: output_cpu_charge0/excited_state_density_state3.cube
+  ✓ Density difference: output_cpu_charge0/density_difference_state3.cube
+======================================================================
+
+======================================================================
+GENERATING ORBITAL PAIR TRANSITION DENSITY CUBE FILES
+======================================================================
+
+State 1 (7.8211 eV):
+  ✓ Rank 1: HOMO → LUMO (100.00%) → output_cpu_charge0/transition_pair_state1_HOMO_to_LUMO.cube
+
+State 2 (9.9187 eV):
+  ✓ Rank 1: HOMO-1 → LUMO (98.32%) → output_cpu_charge0/transition_pair_state2_HOMOm1_to_LUMO.cube
+  Skipping HOMO-2 → LUMO+1 (contribution 1.68% < 5%)
+
+State 3 (9.9597 eV):
+  ✓ Rank 1: HOMO → LUMO+1 (100.00%) → output_cpu_charge0/transition_pair_state3_HOMO_to_LUMOp1.cube
+======================================================================
+
+======================================================================
+CALCULATION SUMMARY
+======================================================================
+
+Molecule: XYZ file: H2O.xyz
+Basis set: 6-31g
+Number of atoms: 3
+Number of electrons: 10
+Number of basis functions: 13
+Molecular charge: 0
+Spin multiplicity: 1 (closed-shell)
+
+Computational settings:
+  DFT method: RKS
+  XC functional: b3lyp
+  Parallel threads: auto-detected
+  TDDFT method: Full TDDFT (not TDA)
+  Number of excited states calculated: 10
+
+Grid settings:
+  Mode: Box dimensions
+  Margin: 4.0 Å, Spacing: 0.2 Å
+  Grid: 40 × 48 × 43 = 82,560 points
+
+Output files generated:
+  ✓ HOMO/LUMO orbitals (in output_cpu_charge0/)
+  ✓ NTO analysis for 3 state(s)
+  ✓ Cube files for 3 state(s):
+    - Transition density matrices
+    - Excited state densities
+    - Density differences
+
+All output files saved to: output_cpu_charge0/
+
+✓ Calculation completed successfully!
+✓ All files saved to: output_cpu_charge0/
+
