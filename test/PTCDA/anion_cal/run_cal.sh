@@ -14,8 +14,8 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
 
 # --- Molecule Selection ---
 USE_XYZ=True                    # True: use XYZ file, False: use H2O test molecule
-# XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (if USE_XYZ=True)
-XYZ_FILE="H2O.xyz"      # Path to XYZ file (if USE_XYZ=True)
+XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (if USE_XYZ=True)
+# XYZ_FILE="H2O.xyz"      # Path to XYZ file (if USE_XYZ=True)
 BASIS_SET="6-31g"               # Basis set: 6-31g, 6-31g*, def2-SVP, etc.
 
 # --- Charge and Spin Settings ---

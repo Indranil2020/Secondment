@@ -35,7 +35,7 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'H2O.xyz'
+XYZ_FILE = 'PTCDA_clean.xyz'
 BASIS_SET = '6-31g'
 
 # --- Charge and Spin Settings ---

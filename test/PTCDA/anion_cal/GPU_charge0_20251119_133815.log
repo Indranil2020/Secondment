@@ -1,0 +1,294 @@
+Created output directory: output_gpu_charge0
+
+Parallel computation enabled: 12 threads (auto-detected)
+
+======================================================================
+MOLECULE SETUP
+======================================================================
+Loading molecule from: PTCDA_clean.xyz
+Basis set: 6-31g
+Charge: 0
+Number of atoms: 38
+Number of electrons: 200
+Number of basis functions: 286
+Molecular charge: 0
+Spin multiplicity (2S+1): 1
+Number of unpaired electrons (2S): 0
+System type: Closed-shell (singlet)
+DFT method: RKS (GPU-accelerated)
+
+======================================================================
+GROUND STATE DFT CALCULATION
+======================================================================
+XC functional: b3lyp
+Basis set: 6-31g
+Method: RKS (GPU-accelerated)
+✓ SCF converged
+Ground state energy: -1370.407414 a.u.
+
+======================================================================
+GROUND STATE DENSITY AND POTENTIAL
+======================================================================
+System type: RKS (closed-shell)
+Total electrons: 144.77
+Molecular charge: 0
+Expected electrons: 200
+
+Generating ground state charge density...
+  ✓ Ground state density: output_gpu_charge0/ground_state_density.cube
+    Use this to visualize total electron distribution
+
+Generating electrostatic potential (ESP)...
+  ✓ Electrostatic potential: output_gpu_charge0/electrostatic_potential.cube
+    Use this to identify:
+      - Nucleophilic sites (negative ESP, red)
+      - Electrophilic sites (positive ESP, blue)
+      - Reaction sites and molecular recognition
+
+Generating deformation density...
+  Deformation density = SCF density - Promolecule density
+  Shows charge redistribution due to chemical bonding
+  System: UKS (open-shell)
+  Promolecule alpha electrons: 74.78
+  Promolecule beta electrons: 74.78
+  Promolecule total electrons: 149.57
+  Deformation integral: -4.797247 (should be ~0)
+  Max |deformation|: 0.476740
+  ✓ SCF density: output_gpu_charge0/scf_density.cube
+  ✓ Promolecule density: output_gpu_charge0/promolecule_density.cube
+  ✓ Deformation density: output_gpu_charge0/deformation_density.cube
+  Interpretation:
+    - Positive regions (red): electron accumulation (bonding)
+    - Negative regions (blue): electron depletion (atomic cores)
+======================================================================
+
+======================================================================
+TDDFT CALCULATION
+======================================================================
+Note: TDDFT inherits XC functional (b3lyp) and basis set (6-31g) from ground state
+TDDFT method: TDDFT (RKS-based, GPU-accelerated)
+Using full TDDFT - more accurate but slower
+Calculating 10 excited states...
+✓ TDDFT converged (all states)
+
+======================================================================
+EXCITED STATE ENERGIES
+======================================================================
+State 1: 0.081706 a.u. = 2.223 eV
+State 2: 0.103474 a.u. = 2.816 eV
+State 3: 0.103638 a.u. = 2.820 eV
+State 4: 0.115670 a.u. = 3.148 eV
+State 5: 0.121368 a.u. = 3.303 eV
+State 6: 0.122186 a.u. = 3.325 eV
+State 7: 0.127165 a.u. = 3.460 eV
+State 8: 0.129365 a.u. = 3.520 eV
+State 9: 0.129454 a.u. = 3.523 eV
+State 10: 0.129798 a.u. = 3.532 eV
+======================================================================
+
+======================================================================
+TRANSITION DIPOLE MOMENTS
+======================================================================
+
+Transition dipole moments (a.u.):
+State    μ_x          μ_y          μ_z          |μ|          f           
+----------------------------------------------------------------------
+1          -1.699061   -0.003421    0.000000    1.699065    0.157248
+2          -0.000000    0.000000   -0.022947    0.022947    0.000036
+3          -0.000000   -0.000000   -0.002285    0.002285    0.000000
+4          -0.000566   -0.001183    0.000000    0.001312    0.000000
+5           0.001167    0.001871   -0.000000    0.002205    0.000000
+6           0.000393   -0.001876    0.000000    0.001917    0.000000
+7           0.004103   -0.456198    0.000000    0.456217    0.017645
+8          -0.000000    0.000000   -0.001255    0.001255    0.000000
+9           0.000535   -0.003361   -0.000000    0.003403    0.000001
+10         -0.000000    0.000000   -0.004121    0.004121    0.000001
+======================================================================
+
+======================================================================
+NATURAL TRANSITION ORBITAL ANALYSIS
+======================================================================
+
+State 1 (2.223 eV):
+  NTO orbitals saved to: output_gpu_charge0/nto_state_1.molden
+
+State 2 (2.816 eV):
+  NTO orbitals saved to: output_gpu_charge0/nto_state_2.molden
+
+State 3 (2.820 eV):
+  NTO orbitals saved to: output_gpu_charge0/nto_state_3.molden
+======================================================================
+
+======================================================================
+TRANSITION CONTRIBUTION ANALYSIS
+======================================================================
+Analyzing orbital pair contributions to excited states...
+
+======================================================================
+STATE 1: 2.2233 eV
+======================================================================
+Rank   Transition           Weight       Percentage   Cumulative  
+----------------------------------------------------------------------
+1      HOMO → LUMO          0.977528     97.75       % 97.75       %
+2      HOMO-6 → LUMO+1      0.022472     2.25        % 100.00      %
+----------------------------------------------------------------------
+Total weight analyzed: 0.758739
+
+======================================================================
+STATE 2: 2.8156 eV
+======================================================================
+Rank   Transition           Weight       Percentage   Cumulative  
+----------------------------------------------------------------------
+1      HOMO-1 → LUMO        0.976662     97.67       % 97.67       %
+2      HOMO-2 → LUMO+2      0.023338     2.33        % 100.00      %
+----------------------------------------------------------------------
+Total weight analyzed: 0.965134
+
+======================================================================
+STATE 3: 2.8201 eV
+======================================================================
+Rank   Transition           Weight       Percentage   Cumulative  
+----------------------------------------------------------------------
+1      HOMO-2 → LUMO        0.976397     97.64       % 97.64       %
+2      HOMO-1 → LUMO+2      0.023603     2.36        % 100.00      %
+----------------------------------------------------------------------
+Total weight analyzed: 0.964903
+
+✓ Contribution tables saved to: output_gpu_charge0/contribution_tables.txt
+
+======================================================================
+GENERATING ORBITAL PAIR TRANSITION DENSITY CUBE FILES
+======================================================================
+Note: Cube files will be generated after grid parameters are calculated
+      (see CUBE FILE GENERATION section below)
+======================================================================
+
+======================================================================
+GRID PARAMETERS
+======================================================================
+Using box dimensions with margin: 4.0 Å
+Grid spacing: 0.2 Å
+Calculated grid resolution: 99 × 75 × 40
+Total grid points: 297,000
+Box size: [19.71000433 14.90917125  8.        ] Å
+======================================================================
+
+======================================================================
+GENERATING HOMO/LUMO CUBE FILES
+======================================================================
+HOMO index: 99
+LUMO index: 100
+HOMO energy: -6.641 eV
+LUMO energy: -4.445 eV
+HOMO-LUMO gap: 2.196 eV
+
+  ✓ HOMO orbital: output_gpu_charge0/HOMO.cube
+  ✓ LUMO orbital: output_gpu_charge0/LUMO.cube
+  ✓ HOMO-1 orbital: output_gpu_charge0/HOMO-1.cube
+  ✓ LUMO+1 orbital: output_gpu_charge0/LUMO+1.cube
+
+Verification tip:
+For the first excited state (S1), check if the transition density
+resembles a HOMO→LUMO transition by comparing:
+  - transition_density_state1.cube
+  - HOMO.cube (electron depletion)
+  - LUMO.cube (electron accumulation)
+
+----------------------------------------------------------------------
+ANALYTICAL VERIFICATION: HOMO→LUMO Transition Density
+----------------------------------------------------------------------
+  ✓ Analytical HOMO→LUMO transition: output_gpu_charge0/transition_HOMO_LUMO_analytical.cube
+
+To verify S1 is a HOMO→LUMO transition, compare:
+  1. output_gpu_charge0/transition_density_state1.cube
+  2. output_gpu_charge0/transition_HOMO_LUMO_analytical.cube
+
+They should be very similar if S1 is dominated by HOMO→LUMO excitation.
+You can calculate the overlap/similarity in VMD or by visual inspection.
+======================================================================
+
+======================================================================
+GENERATING EXCITED STATE CUBE FILES
+======================================================================
+Generating cube files for states: [1, 2, 3]
+Grid resolution: 99 × 75 × 40
+
+State 1: 2.223 eV
+  ✓ Transition density: output_gpu_charge0/transition_density_state1.cube
+  ✓ Excited state density: output_gpu_charge0/excited_state_density_state1.cube
+  ✓ Density difference: output_gpu_charge0/density_difference_state1.cube
+
+  ------------------------------------------------------------------
+  QUANTITATIVE VERIFICATION: S1 vs HOMO→LUMO
+  ------------------------------------------------------------------
+  Similarity (cosine): -0.8790
+  HOMO→LUMO weight: 0.9335 (93.4%)
+  HOMO→LUMO amplitude: 0.8612
+  ⚠ S1 is NOT a pure HOMO→LUMO transition (multi-configurational)
+  ------------------------------------------------------------------
+
+State 2: 2.816 eV
+  ✓ Transition density: output_gpu_charge0/transition_density_state2.cube
+  ✓ Excited state density: output_gpu_charge0/excited_state_density_state2.cube
+  ✓ Density difference: output_gpu_charge0/density_difference_state2.cube
+
+State 3: 2.820 eV
+  ✓ Transition density: output_gpu_charge0/transition_density_state3.cube
+  ✓ Excited state density: output_gpu_charge0/excited_state_density_state3.cube
+  ✓ Density difference: output_gpu_charge0/density_difference_state3.cube
+======================================================================
+
+======================================================================
+GENERATING ORBITAL PAIR TRANSITION DENSITY CUBE FILES
+======================================================================
+
+State 1 (2.2233 eV):
+  ✓ Rank 1: HOMO → LUMO (97.75%) → output_gpu_charge0/transition_pair_state1_HOMO_to_LUMO.cube
+  Skipping HOMO-6 → LUMO+1 (contribution 2.25% < 5%)
+
+State 2 (2.8156 eV):
+  ✓ Rank 1: HOMO-1 → LUMO (97.67%) → output_gpu_charge0/transition_pair_state2_HOMOm1_to_LUMO.cube
+  Skipping HOMO-2 → LUMO+2 (contribution 2.33% < 5%)
+
+State 3 (2.8201 eV):
+  ✓ Rank 1: HOMO-2 → LUMO (97.64%) → output_gpu_charge0/transition_pair_state3_HOMOm2_to_LUMO.cube
+  Skipping HOMO-1 → LUMO+2 (contribution 2.36% < 5%)
+======================================================================
+
+======================================================================
+CALCULATION SUMMARY
+======================================================================
+
+Molecule: XYZ file: PTCDA_clean.xyz
+Basis set: 6-31g
+Number of atoms: 38
+Number of electrons: 200
+Number of basis functions: 286
+Molecular charge: 0
+Spin multiplicity: 1 (closed-shell)
+
+Computational settings:
+  DFT method: RKS
+  XC functional: b3lyp
+  Parallel threads: auto-detected
+  TDDFT method: Full TDDFT (not TDA)
+  Number of excited states calculated: 10
+
+Grid settings:
+  Mode: Box dimensions
+  Margin: 4.0 Å, Spacing: 0.2 Å
+  Grid: 99 × 75 × 40 = 297,000 points
+
+Output files generated:
+  ✓ HOMO/LUMO orbitals (in output_gpu_charge0/)
+  ✓ NTO analysis for 3 state(s)
+  ✓ Cube files for 3 state(s):
+    - Transition density matrices
+    - Excited state densities
+    - Density differences
+
+All output files saved to: output_gpu_charge0/
+
+✓ Calculation completed successfully!
+✓ All files saved to: output_gpu_charge0/
+
