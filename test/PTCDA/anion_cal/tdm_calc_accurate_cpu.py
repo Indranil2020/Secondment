@@ -241,45 +241,83 @@ else:
 
 print(f"DFT method: {dft_method}")
 
+# ==================================================================
+# 2.  GEOMETRY  (optional) → GROUND STATE  →  PROPERTIES / TDDFT
+# ==================================================================
+print("\n" + "="*70)
+print("GEOMETRY & GROUND STATE SETUP")
+print("="*70)
+# ---------- 2a.  parse functional / dispersion --------------------
+m = re.search(r'-((?:d3bj|d3zero|d4))$', XC_FUNCTIONAL.lower())
+clean_xc  = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL
+disp_suffix = m.group(1) if m else None
+
+# ---------- 2b.  helper: build mf with current geometry ------------
+def build_mf(mol):
+    """Build mf with identical settings for opt or final."""
+    mf = (dft.RKS if actual_spin == 1 else dft.UKS)(mol, xc=clean_xc)
+    if disp_suffix:
+        # CPU native
+        mf.disp = disp_suffix
+        # GPU branch:  mf = d3.DFTD3Dispersion(mf, version=disp_suffix)
+    return mf
+
+# ---------- 2c.  geometry optimisation? ---------------------------
+OPTIMISE_GEOMETRY = True              # user toggle
+if OPTIMISE_GEOMETRY:
+    from pyscf.geomopt.geometric_solver import optimize as opt_kernel
+
+    print("Optimising geometry with dispersion-corrected forces...")
+    mf = build_mf(mol)                # minimal SCF for gradients
+    mol = opt_kernel(mf, maxsteps=50)
+    opt_xyz = os.path.join(OUTPUT_DIR, 'optimised_structure.xyz')
+    mol.tofile(opt_xyz, format='xyz')
+    print(f"✓ Optimised geometry saved to: {opt_xyz}")
+
+# ---------- 2d.  final SCF (only one kernel call) -----------------
+mf = build_mf(mol)                    # same settings, (opt) geometry
+mf.kernel()
+print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
+
 # ============================================================================
 # 2. GROUND STATE DFT CALCULATION
 # ============================================================================
 
-print("\n" + "="*70)
-print("GROUND STATE DFT CALCULATION")
-print("="*70)
-print(f"XC functional: {XC_FUNCTIONAL}")
-print(f"Basis set: {BASIS_SET}")
-print(f"Method: {dft_method}")
+# print("\n" + "="*70)
+# print("GROUND STATE DFT CALCULATION")
+# print("="*70)
+# print(f"XC functional: {XC_FUNCTIONAL}")
+# print(f"Basis set: {BASIS_SET}")
+# print(f"Method: {dft_method}")
 
-# ---------- 1.  split “functional-d3bj” into (“functional”, “d3bj”) ---
-m = re.search(r'-((?:d3bj|d3|d3zero|d4|d3bps))$', XC_FUNCTIONAL.lower())
-clean_xc = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL   # remove suffix
-disp_suffix = m.group(1) if m else None                       # d3bj, d4, …
+# # ---------- 1.  split “functional-d3bj” into (“functional”, “d3bj”) ---
+# m = re.search(r'-((?:d3bj|d3|d3zero|d4|d3bps))$', XC_FUNCTIONAL.lower())
+# clean_xc = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL   # remove suffix
+# disp_suffix = m.group(1) if m else None                       # d3bj, d4, …
 
-# ---------- 2.  create RKS/UKS with the *clean* functional ------------
-if actual_spin == 1:
-    mf = dft.RKS(mol, xc=clean_xc)
-else:
-    mf = dft.UKS(mol, xc=clean_xc)
+# # ---------- 2.  create RKS/UKS with the *clean* functional ------------
+# if actual_spin == 1:
+#     mf = dft.RKS(mol, xc=clean_xc)
+# else:
+#     mf = dft.UKS(mol, xc=clean_xc)
 
-# ---------- 3.  add dispersion if present -----------------------------
-if disp_suffix:
-    mf.disp = disp_suffix
-    print(f"✓ Adding DFT-{disp_suffix.upper()} dispersion correction")
+# # ---------- 3.  add dispersion if present -----------------------------
+# if disp_suffix:
+#     mf.disp = disp_suffix
+#     print(f"✓ Adding DFT-{disp_suffix.upper()} dispersion correction")
 
-print('driver object :', type(mf))
-print('has disp attr :', hasattr(mf, 'disp'))
-# ---------- 4.  run SCF -------------------------------------------------
-mf.kernel()
+# print('driver object :', type(mf))
+# print('has disp attr :', hasattr(mf, 'disp'))
+# # ---------- 4.  run SCF -------------------------------------------------
+# mf.kernel()
 
-if not mf.converged:
-    print("WARNING: SCF did not converge!")
-    print("Try: 1) Different initial guess, 2) Level shifting, 3) DIIS settings")
-else:
-    print("✓ SCF converged")
+# if not mf.converged:
+#     print("WARNING: SCF did not converge!")
+#     print("Try: 1) Different initial guess, 2) Level shifting, 3) DIIS settings")
+# else:
+#     print("✓ SCF converged")
 
-print(f"Ground state energy: {mf.e_tot:.6f} a.u.")
+# print(f"Ground state energy: {mf.e_tot:.6f} a.u.")
 
 # ============================================================================
 # 2A. GROUND STATE DENSITY AND ELECTROSTATIC POTENTIAL
