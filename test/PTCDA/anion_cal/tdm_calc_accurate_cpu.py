@@ -13,10 +13,11 @@ Features:
 - HOMO/LUMO cube file generation
 '''
 
-from pyscf import gto, dft, tddft, lib
+from pyscf import gto, dft, tddft, lib 
 from pyscf.tools import cubegen, molden
 import numpy as np
 from functools import reduce
+import re
 import os
 
 # ============================================================================
@@ -30,7 +31,7 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 XYZ_FILE = 'H2O.xyz'
-BASIS_SET = '6-31g'
+BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
 CHARGE = -1
@@ -41,7 +42,7 @@ SPIN = None
 
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
-XC_FUNCTIONAL = 'b3lyp'
+XC_FUNCTIONAL = 'wb97x-d3bj'
 # Common options:
 #   'b3lyp'    - B3LYP (hybrid, good general purpose)
 #   'pbe0'     - PBE0 (hybrid, good for excited states)
@@ -109,7 +110,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'output_cpu_charge-1'
+OUTPUT_DIR = 'h2o_output_cpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -251,13 +252,25 @@ print(f"XC functional: {XC_FUNCTIONAL}")
 print(f"Basis set: {BASIS_SET}")
 print(f"Method: {dft_method}")
 
-# Select RKS (closed-shell) or UKS (open-shell) based on spin
-if actual_spin == 1:
-    mf = dft.RKS(mol)
-else:
-    mf = dft.UKS(mol)
+# ---------- 1.  split “functional-d3bj” into (“functional”, “d3bj”) ---
+m = re.search(r'-((?:d3bj|d3|d3zero|d4|d3bps))$', XC_FUNCTIONAL.lower())
+clean_xc = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL   # remove suffix
+disp_suffix = m.group(1) if m else None                       # d3bj, d4, …
 
-mf.xc = XC_FUNCTIONAL
+# ---------- 2.  create RKS/UKS with the *clean* functional ------------
+if actual_spin == 1:
+    mf = dft.RKS(mol, xc=clean_xc)
+else:
+    mf = dft.UKS(mol, xc=clean_xc)
+
+# ---------- 3.  add dispersion if present -----------------------------
+if disp_suffix:
+    mf.disp = disp_suffix
+    print(f"✓ Adding DFT-{disp_suffix.upper()} dispersion correction")
+
+print('driver object :', type(mf))
+print('has disp attr :', hasattr(mf, 'disp'))
+# ---------- 4.  run SCF -------------------------------------------------
 mf.kernel()
 
 if not mf.converged:
