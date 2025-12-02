@@ -17,10 +17,12 @@ Requirements:
 
 from pyscf import gto, lib
 from pyscf.tools import cubegen, molden
-from gpu4pyscf import dft
+from gpu4pyscf import dft 
 from gpu4pyscf.tdscf import rks as gpu_tdrks, uks as gpu_tduks
 import numpy as np
 from functools import reduce
+from dftd3.pyscf import DFTD3Dispersion as disp
+import re
 import os
 
 # ============================================================================
@@ -35,8 +37,8 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'PTCDA_clean.xyz'
-BASIS_SET = '6-31g'
+XYZ_FILE = 'H2O.xyz'
+BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
 CHARGE = -1
@@ -47,7 +49,7 @@ SPIN = None
 
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
-XC_FUNCTIONAL = 'b3lyp'
+XC_FUNCTIONAL = 'wb97x-d3bj'
 # Common options:
 #   'b3lyp'    - B3LYP (hybrid, good general purpose)
 #   'pbe0'     - PBE0 (hybrid, good for excited states)
@@ -115,7 +117,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'output_gpu_charge-1'
+OUTPUT_DIR = 'h2o_output_gpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -257,13 +259,25 @@ print(f"XC functional: {XC_FUNCTIONAL}")
 print(f"Basis set: {BASIS_SET}")
 print(f"Method: {dft_method} (GPU-accelerated)")
 
-# Select RKS (closed-shell) or UKS (open-shell) based on spin
-if actual_spin == 1:
-    mf = dft.RKS(mol)
-else:
-    mf = dft.UKS(mol)
+# ---------- 1.  split “functional-d3bj” into (“functional”, “d3bj”) ---
+m = re.search(r'-((?:d3bj|d3|d3zero|d4|d3bps))$', XC_FUNCTIONAL.lower())
+clean_xc = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL   # remove suffix
+disp_suffix = m.group(1) if m else None                       # d3bj, d4, …
 
-mf.xc = XC_FUNCTIONAL
+# ---------- 2.  create RKS/UKS with the *clean* functional ------------
+if actual_spin == 1:
+    mf = dft.RKS(mol, xc=clean_xc)
+else:
+    mf = dft.UKS(mol, xc=clean_xc)
+
+# ---------- 3.  add dispersion if present -----------------------------
+if disp_suffix:
+    mf.disp = disp_suffix
+    print(f"✓ Adding DFT-{disp_suffix.upper()} dispersion correction")
+
+print('driver object :', type(mf))
+print('has disp attr :', hasattr(mf, 'disp'))
+# ---------- 4.  run SCF -------------------------------------------------
 mf.kernel()
 
 if not mf.converged:
