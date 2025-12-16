@@ -30,7 +30,7 @@ NUM_THREADS = 0
 
 # --- Molecule Selection ---
 USE_XYZ = True
-XYZ_FILE = 'H2O.xyz'
+XYZ_FILE = 'PTCDA_clean.xyz'
 BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
@@ -54,13 +54,19 @@ XC_FUNCTIONAL = 'wb97x-d3bj'
 NUM_EXCITED_STATES = 10
 
 # --- TDDFT Method Selection ---
-USE_TDA = False
+USE_TDA = True
 # TDA (Tamm-Dancoff Approximation) is recommended for large systems or initial testing
 # For charged/open-shell systems, TDDFT automatically uses appropriate method
 # Closed-shell (spin=1): Uses RKS/TDDFT or RKS/TDA
 # Open-shell (spin>1): Uses UKS/TDDFT or UKS/TDA
 
-# --- Output Selection ---
+# --- Geometry Optimization Settings ---
+OPTIMISE_GEOMETRY = False
+OPT_MAX_STEPS = 100
+OPT_CONV_PARAMS = 'tight'
+
+# --- Verbose/Debug Settings ---
+VERBOSE_LEVEL = 4
 # STATES_TO_OUTPUT: Which states to generate CUBE FILES for (0-indexed)
 # Cube files are large (~150-500 MB per state), so be selective
 # Examples:
@@ -110,7 +116,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'h2o_output_cpu_charge-1'
+OUTPUT_DIR = 'PTCDA_clean_wb97x_d3bj_6_31g__cpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -253,31 +259,84 @@ clean_xc  = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL
 disp_suffix = m.group(1) if m else None
 
 # ---------- 2b.  helper: build mf with current geometry ------------
-def build_mf(mol):
+def build_mf(mol, verbose_level=VERBOSE_LEVEL):
     """Build mf with identical settings for opt or final."""
     mf = (dft.RKS if actual_spin == 1 else dft.UKS)(mol, xc=clean_xc)
     if disp_suffix:
-        # CPU native
         mf.disp = disp_suffix
-        # GPU branch:  mf = d3.DFTD3Dispersion(mf, version=disp_suffix)
+    # Set verbosity based on VERBOSE_LEVEL
+    if verbose_level >= 3:
+        mf.verbose = 5  # Debug: show everything
+    elif verbose_level >= 2:
+        mf.verbose = 4  # Detailed: show SCF iterations
+    elif verbose_level >= 1:
+        mf.verbose = 3  # Normal: show key info
+    else:
+        mf.verbose = 2  # Minimal
     return mf
 
-# ---------- 2c.  geometry optimisation? ---------------------------
-OPTIMISE_GEOMETRY = True              # user toggle
+# ---------- 2c.  convergence parameters for optimization -----------
+def get_opt_conv_params(conv_preset):
+    """Get convergence parameters for geometry optimization."""
+    presets = {
+        'tight': {'convergence_energy': 1e-6, 'convergence_grms': 3e-4, 'convergence_gmax': 4.5e-4,
+                  'convergence_drms': 1.2e-3, 'convergence_dmax': 1.8e-3},
+        'normal': {'convergence_energy': 1e-5, 'convergence_grms': 1e-3, 'convergence_gmax': 1.5e-3,
+                   'convergence_drms': 4e-3, 'convergence_dmax': 6e-3},
+        'loose': {'convergence_energy': 1e-4, 'convergence_grms': 3e-3, 'convergence_gmax': 4.5e-3,
+                  'convergence_drms': 1.2e-2, 'convergence_dmax': 1.8e-2},
+    }
+    if isinstance(conv_preset, dict):
+        return conv_preset
+    return presets.get(conv_preset.lower(), presets['normal'])
+
+# ---------- 2d.  geometry optimisation? ---------------------------
 if OPTIMISE_GEOMETRY:
     from pyscf.geomopt.geometric_solver import optimize as opt_kernel
-
+    
+    print("\n" + "-"*70)
+    print("GEOMETRY OPTIMIZATION")
+    print("-"*70)
+    print(f"Max steps: {OPT_MAX_STEPS}")
+    print(f"Convergence: {OPT_CONV_PARAMS}")
+    if VERBOSE_LEVEL >= 2:
+        conv_params = get_opt_conv_params(OPT_CONV_PARAMS)
+        print(f"  Energy threshold:  {conv_params['convergence_energy']:.1e} a.u.")
+        print(f"  Gradient RMS:      {conv_params['convergence_grms']:.1e} a.u./Bohr")
+    print("-"*70)
+    
     print("Optimising geometry with dispersion-corrected forces...")
-    mf = build_mf(mol)                # minimal SCF for gradients
-    mol = opt_kernel(mf, maxsteps=50)
+    mf = build_mf(mol)
+    conv_params = get_opt_conv_params(OPT_CONV_PARAMS)
+    mol = opt_kernel(mf, maxsteps=OPT_MAX_STEPS, **conv_params)
     opt_xyz = os.path.join(OUTPUT_DIR, 'optimised_structure.xyz')
     mol.tofile(opt_xyz, format='xyz')
     print(f"✓ Optimised geometry saved to: {opt_xyz}")
 
-# ---------- 2d.  final SCF (only one kernel call) -----------------
-mf = build_mf(mol)                    # same settings, (opt) geometry
+# ---------- 2e.  final SCF (only one kernel call) -----------------
+print("\n" + "-"*70)
+print("GROUND STATE DFT CALCULATION")
+print("-"*70)
+print(f"XC functional: {XC_FUNCTIONAL} (clean: {clean_xc})")
+print(f"Dispersion: {disp_suffix if disp_suffix else 'None'}")
+print(f"Basis set: {BASIS_SET}")
+print(f"Method: {dft_method}")
+print("-"*70)
+
+mf = build_mf(mol)
 mf.kernel()
-print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
+
+if not mf.converged:
+    print("⚠ WARNING: SCF did not converge!")
+    print("  Try: 1) Different initial guess, 2) Level shifting, 3) DIIS settings")
+else:
+    print("✓ SCF converged")
+
+# Print energy with precision based on verbose level
+if VERBOSE_LEVEL >= 2:
+    print(f"✓ Ground-state energy: {mf.e_tot:.8f} a.u.")
+else:
+    print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
 
 # ============================================================================
 # 2. GROUND STATE DFT CALCULATION
@@ -510,8 +569,26 @@ if USE_TDA:
 else:
     td = tddft.TDDFT(mf)  # More accurate
     print("Using full TDDFT - more accurate but slower")
+
+# Set verbosity for TDDFT - use higher verbose to see iteration progress
+if VERBOSE_LEVEL >= 3:
+    td.verbose = 6  # Debug: show everything including each Davidson iteration
+elif VERBOSE_LEVEL >= 2:
+    td.verbose = 5  # Detailed: show Davidson iterations
+elif VERBOSE_LEVEL >= 1:
+    td.verbose = 4  # Normal: show key info
+else:
+    td.verbose = 3  # Minimal
+
+# Set convergence parameters for TDDFT eigenvalue solver
+td.max_cycle = 100  # Maximum Davidson iterations (default is 100)
+td.conv_tol = 1e-5  # Convergence tolerance (default is 1e-5)
+
 td.nstates = NUM_EXCITED_STATES
 print(f"Calculating {NUM_EXCITED_STATES} excited states...")
+print(f"  Max Davidson cycles: {td.max_cycle}")
+print(f"  Convergence tolerance: {td.conv_tol}")
+print(f"  Verbose level: {td.verbose}")
 td.kernel()
 
 # Handle both RKS (scalar) and UKS (array) convergence
@@ -529,12 +606,15 @@ else:  # RKS: scalar
 
 td.analyze()  # Print detailed analysis
 
-# Print excitation energies
+# Print excitation energies with precision based on verbose level
 print("\n" + "="*70)
 print("EXCITED STATE ENERGIES")
 print("="*70)
 for i, energy in enumerate(td.e):
-    print(f"State {i+1}: {energy:.6f} a.u. = {energy*27.211:.3f} eV")
+    if VERBOSE_LEVEL >= 2:
+        print(f"State {i+1}: {energy:.8f} a.u. = {energy*27.211:.6f} eV")
+    else:
+        print(f"State {i+1}: {energy:.6f} a.u. = {energy*27.211:.3f} eV")
 print("="*70)
 
 # ============================================================================
@@ -579,21 +659,28 @@ def calculate_transition_dipole(td, state_id):
     # Check if UKS by checking if X is a tuple (more reliable than mo_coeff)
     is_uks = isinstance(X, tuple)
     
+    # Check if TDA (Y=0 as integer, not array)
+    is_tda = not hasattr(Y, 'shape')
+    
     if is_uks:
         # UKS: mo_coeff and mo_occ are tuples (alpha, beta)
         # For UKS, X and Y are also tuples: (Xa, Xb), (Ya, Yb)
         mo_coeff_a, mo_coeff_b = mo_coeff
         mo_occ_a, mo_occ_b = mo_occ
         Xa, Xb = X
-        Ya, Yb = Y
+        if is_tda:
+            Ya = Yb = 0
+        else:
+            Ya, Yb = Y
         
-        # Alpha spin
+        # Alpha spin (for TDA: Y=0, so X+Y = X)
         nocc_a = Xa.shape[0]
         nvir_a = Xa.shape[1]
         nmo_a = mo_coeff_a.shape[1]
         
+        amp_a = Xa if is_tda else (Xa + Ya)
         t_dm1_mo_a = np.zeros((nmo_a, nmo_a))
-        t_dm1_mo_a[:nocc_a, nocc_a:] = (Xa + Ya).reshape(nocc_a, nvir_a)
+        t_dm1_mo_a[:nocc_a, nocc_a:] = amp_a.reshape(nocc_a, nvir_a)
         t_dm1_ao_a = reduce(np.dot, (mo_coeff_a, t_dm1_mo_a, mo_coeff_a.T))
         
         # Beta spin
@@ -601,8 +688,9 @@ def calculate_transition_dipole(td, state_id):
         nvir_b = Xb.shape[1]
         nmo_b = mo_coeff_b.shape[1]
         
+        amp_b = Xb if is_tda else (Xb + Yb)
         t_dm1_mo_b = np.zeros((nmo_b, nmo_b))
-        t_dm1_mo_b[:nocc_b, nocc_b:] = (Xb + Yb).reshape(nocc_b, nvir_b)
+        t_dm1_mo_b[:nocc_b, nocc_b:] = amp_b.reshape(nocc_b, nvir_b)
         t_dm1_ao_b = reduce(np.dot, (mo_coeff_b, t_dm1_mo_b, mo_coeff_b.T))
         
         # Total transition density (alpha + beta)
@@ -615,9 +703,10 @@ def calculate_transition_dipole(td, state_id):
         nocc = orbo.shape[1]
         nvir = orbv.shape[1]
         
-        # Transition density in MO basis
+        # Transition density in MO basis (for TDA: Y=0, so X+Y = X)
+        amp = X if is_tda else (X + Y)
         t_dm1_mo = np.zeros((mo_coeff.shape[1], mo_coeff.shape[1]))
-        t_dm1_mo[:nocc, nocc:] = (X + Y).reshape(nocc, nvir)
+        t_dm1_mo[:nocc, nocc:] = amp.reshape(nocc, nvir)
         
         # Transform to AO basis
         t_dm1_ao = reduce(np.dot, (mo_coeff, t_dm1_mo, mo_coeff.T))
@@ -671,11 +760,17 @@ def calculate_transition_density_matrix(td, state_id):
     mo_occ = td._scf.mo_occ
     is_uks = isinstance(X, tuple)
     
+    # Check if TDA (Y=0 as integer, not array)
+    is_tda = not hasattr(Y, 'shape')
+    
     if is_uks:
         mo_coeff_a, mo_coeff_b = mo_coeff
         mo_occ_a, mo_occ_b = mo_occ
         Xa, Xb = X
-        Ya, Yb = Y
+        if is_tda:
+            Ya = Yb = 0
+        else:
+            Ya, Yb = Y
         
         nocc_a = Xa.shape[0]
         nvir_a = Xa.shape[1]
@@ -684,16 +779,18 @@ def calculate_transition_density_matrix(td, state_id):
         nmo_a = mo_coeff_a.shape[1]
         nmo_b = mo_coeff_b.shape[1]
         
-        # Alpha spin
+        # Alpha spin (for TDA: Y=0, so X+Y = X)
+        amp_a = Xa if is_tda else (Xa + Ya)
         t_dm1_mo_a = np.zeros((nmo_a, nmo_a))
-        t_dm1_mo_a[:nocc_a, nocc_a:] = Xa + Ya
-        t_dm1_mo_a[nocc_a:, :nocc_a] = (Xa + Ya).T
+        t_dm1_mo_a[:nocc_a, nocc_a:] = amp_a
+        t_dm1_mo_a[nocc_a:, :nocc_a] = amp_a.T
         t_dm1_ao_a = reduce(np.dot, (mo_coeff_a, t_dm1_mo_a, mo_coeff_a.T))
         
         # Beta spin
+        amp_b = Xb if is_tda else (Xb + Yb)
         t_dm1_mo_b = np.zeros((nmo_b, nmo_b))
-        t_dm1_mo_b[:nocc_b, nocc_b:] = Xb + Yb
-        t_dm1_mo_b[nocc_b:, :nocc_b] = (Xb + Yb).T
+        t_dm1_mo_b[:nocc_b, nocc_b:] = amp_b
+        t_dm1_mo_b[nocc_b:, :nocc_b] = amp_b.T
         t_dm1_ao_b = reduce(np.dot, (mo_coeff_b, t_dm1_mo_b, mo_coeff_b.T))
         
         t_dm1_ao = t_dm1_ao_a + t_dm1_ao_b
@@ -703,10 +800,11 @@ def calculate_transition_density_matrix(td, state_id):
         nocc = orbo.shape[1]
         nvir = orbv.shape[1]
         
-        # Transition density in MO basis
+        # Transition density in MO basis (for TDA: Y=0, so X+Y = X)
+        amp = X.reshape(nocc, nvir) if is_tda else (X + Y).reshape(nocc, nvir)
         t_dm1_mo = np.zeros((mo_coeff.shape[1], mo_coeff.shape[1]))
-        t_dm1_mo[:nocc, nocc:] = (X + Y).reshape(nocc, nvir)
-        t_dm1_mo[nocc:, :nocc] = (X + Y).reshape(nocc, nvir).T
+        t_dm1_mo[:nocc, nocc:] = amp
+        t_dm1_mo[nocc:, :nocc] = amp.T
         t_dm1_ao = reduce(np.dot, (mo_coeff, t_dm1_mo, mo_coeff.T))
     
     return t_dm1_ao
@@ -733,6 +831,9 @@ def calculate_excited_state_density(td, state_id):
     mo_occ = mf.mo_occ
     is_uks = isinstance(X, tuple)
     
+    # Check if TDA (Y=0 as integer, not array)
+    is_tda = not hasattr(Y, 'shape')
+    
     if is_uks:
         # UKS case - simplified approach: use transition density
         # For visualization, transition density is more meaningful
@@ -745,10 +846,12 @@ def calculate_excited_state_density(td, state_id):
         
         # Occupied-occupied and virtual-virtual blocks
         dm_oo = -np.einsum('ia,ka->ik', X.conj(), X)
-        dm_oo -= np.einsum('ia,ka->ik', Y.conj(), Y)
-        
         dm_vv = np.einsum('ia,ic->ac', X, X.conj())
-        dm_vv += np.einsum('ia,ic->ac', Y, Y.conj())
+        
+        # Add Y contribution only for full TDDFT (not TDA)
+        if not is_tda:
+            dm_oo -= np.einsum('ia,ka->ik', Y.conj(), Y)
+            dm_vv += np.einsum('ia,ic->ac', Y, Y.conj())
         
         # Start with ground state density in MO basis
         dm = np.diag(mo_occ)
@@ -803,16 +906,20 @@ def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10)
     """
     X, Y = td.xy[state_id]
     
+    # Check if TDA (Y=0 as integer, not array)
+    is_tda = not hasattr(Y, 'shape')
+    
     # Handle UKS: X and Y are tuples (Xa, Xb), (Ya, Yb)
     # For simplicity, analyze alpha spin (dominant for most cases)
     if isinstance(X, tuple):
         X, _ = X
-        Y, _ = Y
+        if not is_tda:
+            Y, _ = Y
     
     nocc, nvir = X.shape
     
-    # For full TDDFT, the contribution is from (X + Y)
-    amplitudes = X + Y
+    # For full TDDFT, the contribution is from (X + Y); for TDA, just X
+    amplitudes = X if is_tda else (X + Y)
     
     # Calculate weights (squared amplitudes)
     weights = amplitudes ** 2
@@ -1276,20 +1383,26 @@ else:
             # Calculate HOMO→LUMO contribution from TDDFT amplitudes
             X, Y = td.xy[0]
             
+            # Check if TDA (Y=0 as integer, not array)
+            is_tda = not hasattr(Y, 'shape')
+            
             # Handle UKS: X and Y are tuples (Xa, Xb), (Ya, Yb)
             if actual_spin > 1:  # UKS
                 Xa, Xb = X
-                Ya, Yb = Y
+                if is_tda:
+                    Ya = 0
+                else:
+                    Ya, Yb = Y
                 # Use alpha for verification
                 nocc = Xa.shape[0]
                 nvir = Xa.shape[1]
-                homo_lumo_amplitude = abs(Xa[nocc-1, 0] + Ya[nocc-1, 0])
-                total_amplitude = np.linalg.norm(Xa + Ya)
+                homo_lumo_amplitude = abs(Xa[nocc-1, 0]) if is_tda else abs(Xa[nocc-1, 0] + Ya[nocc-1, 0])
+                total_amplitude = np.linalg.norm(Xa) if is_tda else np.linalg.norm(Xa + Ya)
             else:  # RKS
                 nocc = X.shape[0]
                 nvir = X.shape[1]
-                homo_lumo_amplitude = abs(X[nocc-1, 0] + Y[nocc-1, 0])
-                total_amplitude = np.linalg.norm(X + Y)
+                homo_lumo_amplitude = abs(X[nocc-1, 0]) if is_tda else abs(X[nocc-1, 0] + Y[nocc-1, 0])
+                total_amplitude = np.linalg.norm(X) if is_tda else np.linalg.norm(X + Y)
             
             homo_lumo_weight = (homo_lumo_amplitude / total_amplitude)**2
             

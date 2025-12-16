@@ -16,21 +16,35 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
 USE_XYZ=True                    # True: use XYZ file, False: use H2O test molecule
 XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (if USE_XYZ=True)
 # XYZ_FILE="H2O.xyz"      # Path to XYZ file (if USE_XYZ=True)
-BASIS_SET="6-31g"               # Basis set: 6-31g, 6-31g*, def2-SVP, etc.
+BASIS_SET="6-31g*"               # Basis set: 6-31g, 6-31g*, def2-SVP, etc.
 
 # --- Charge and Spin Settings ---
 # CHARGE can be:
 #   - Single value: CHARGE=-1
 #   - Multiple values (batch): CHARGE="0 1 -1"
 # For batch mode, the script will run calculations for each charge automatically
-CHARGE="0 1 -1"                       # Molecular charge: 0 (neutral), +1 (cation), -1 (anion)
+CHARGE="0 -1"                       # Molecular charge: 0 (neutral), +1 (cation), -1 (anion)
                                 # For batch: CHARGE="0 1 -1" (space-separated)
 SPIN=None                       # Spin multiplicity (2S+1): None=auto, 1=singlet, 2=doublet, 3=triplet
 
 # --- DFT/TDDFT Settings ---
-XC_FUNCTIONAL="b3lyp"           # Exchange-correlation functional: b3lyp, pbe0, cam-b3lyp, etc.
+XC_FUNCTIONAL="wb97x-d3bj"           # Exchange-correlation functional: b3lyp, pbe0, cam-b3lyp, wB97X-D, etc.
 NUM_EXCITED_STATES=10           # Number of excited states to calculate
-USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
+# USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
+USE_TDA=True                   # True: TDA (faster), False: Full TDDFT (more accurate)
+
+# --- Geometry Optimization Settings ---
+# OPTIMISE_GEOMETRY=True          # True: optimize geometry before DFT, False: use input geometry
+OPTIMISE_GEOMETRY=False          # True: optimize geometry before DFT, False: use input geometry
+OPT_MAX_STEPS=100               # Maximum optimization steps
+OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose", or custom dict
+                                # tight: energy 1e-6, gradient 3e-4
+                                # normal: energy 1e-5, gradient 1e-3
+                                # loose: energy 1e-4, gradient 3e-3
+
+# --- Verbose/Debug Settings ---
+VERBOSE_LEVEL=4                # 0: minimal, 1: normal, 2: detailed (8 decimal energy), 3: debug
+                                # Level 2+ shows: optimization steps, SCF iterations, energy convergence
 
 # --- Output Selection ---
 # Which states to generate CUBE FILES for (0-indexed, space-separated)
@@ -77,8 +91,8 @@ NUM_THREADS=0                   # Number of CPU threads (0=auto-detect)
 # ============================================================================
 
 # --- CPU or GPU Selection ---
-USE_GPU=True
-# USE_GPU=False
+# USE_GPU=True
+USE_GPU=False
 
 # --- Output Control ---
 LOG_FILE="calculation.log"      # Log file name (auto-generated with timestamp)
@@ -103,14 +117,22 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Extract molecule name from XYZ_FILE (without .xyz extension)
+MOLECULE_NAME=$(basename "$XYZ_FILE" .xyz)
+
+# Clean up XC functional name for directory (replace special chars)
+XC_CLEAN=$(echo "$XC_FUNCTIONAL" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')
+# Clean up basis set name for directory
+BASIS_CLEAN=$(echo "$BASIS_SET" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g')
+
 # Determine which script to use
 if [ "$USE_GPU" = True ]; then
     SCRIPT_NAME="tdm_calc_accurate_GPU.py"
-    BASE_OUTPUT_DIR="output_gpu"
+    BASE_OUTPUT_DIR="${MOLECULE_NAME}_${XC_CLEAN}_${BASIS_CLEAN}_gpu"
     CALC_TYPE="GPU"
 else
     SCRIPT_NAME="tdm_calc_accurate_cpu.py"
-    BASE_OUTPUT_DIR="output_cpu"
+    BASE_OUTPUT_DIR="${MOLECULE_NAME}_${XC_CLEAN}_${BASIS_CLEAN}_cpu"
     CALC_TYPE="CPU"
 fi
 
@@ -169,6 +191,10 @@ updates = {
     'XC_FUNCTIONAL': "'${XC_FUNCTIONAL}'",
     'NUM_EXCITED_STATES': '${NUM_EXCITED_STATES}',
     'USE_TDA': '${USE_TDA}',
+    'OPTIMISE_GEOMETRY': '${OPTIMISE_GEOMETRY}',
+    'OPT_MAX_STEPS': '${OPT_MAX_STEPS}',
+    'OPT_CONV_PARAMS': "'${OPT_CONV_PARAMS}'",
+    'VERBOSE_LEVEL': '${VERBOSE_LEVEL}',
     'GENERATE_TRANSITION_DENSITY': '${GENERATE_TRANSITION_DENSITY}',
     'GENERATE_EXCITED_DENSITY': '${GENERATE_EXCITED_DENSITY}',
     'GENERATE_DENSITY_DIFFERENCE': '${GENERATE_DENSITY_DIFFERENCE}',
@@ -257,6 +283,14 @@ display_config() {
     echo "  Functional:        ${XC_FUNCTIONAL}"
     echo "  Excited states:    ${NUM_EXCITED_STATES}"
     echo "  Use TDA:           ${USE_TDA}"
+    echo ""
+    echo -e "${YELLOW}Geometry Optimization:${NC}"
+    echo "  Optimize:          ${OPTIMISE_GEOMETRY}"
+    if [ "$OPTIMISE_GEOMETRY" = True ]; then
+        echo "  Max steps:         ${OPT_MAX_STEPS}"
+        echo "  Convergence:       ${OPT_CONV_PARAMS}"
+    fi
+    echo "  Verbose level:     ${VERBOSE_LEVEL}"
     echo ""
     echo -e "${YELLOW}Output:${NC}"
     echo "  States for cubes:  [${STATES_TO_OUTPUT}]"
