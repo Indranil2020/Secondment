@@ -28,10 +28,12 @@ CHARGE="0 -1"                       # Molecular charge: 0 (neutral), +1 (cation)
 SPIN=None                       # Spin multiplicity (2S+1): None=auto, 1=singlet, 2=doublet, 3=triplet
 
 # --- DFT/TDDFT Settings ---
-XC_FUNCTIONAL="wb97x-d3bj"           # Exchange-correlation functional: b3lyp, pbe0, cam-b3lyp, wB97X-D, etc.
+# Supported dispersion: -d3bj, -d3zero, -d3bjm, -d3zerom, -d3op, -d4
+# NOT supported by PySCF: wb97x-d, wb97x-d3 (use wb97x-d3bj instead)
+XC_FUNCTIONAL="wb97x-d3bj"           # Examples: b3lyp, b3lyp-d3bj, pbe0-d4, cam-b3lyp-d3bj, wb97x-d3bj
 NUM_EXCITED_STATES=10           # Number of excited states to calculate
-# USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
-USE_TDA=True                   # True: TDA (faster), False: Full TDDFT (more accurate)
+USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
+# USE_TDA=True                   # True: TDA (faster), False: Full TDDFT (more accurate)
 
 # --- Geometry Optimization Settings ---
 # OPTIMISE_GEOMETRY=True          # True: optimize geometry before DFT, False: use input geometry
@@ -334,28 +336,34 @@ main() {
     echo ""
     
     # Run the calculation
+    # Create output directory first so log file can be saved there
+    mkdir -p "${OUTPUT_DIR}"
+    
+    # Log file path inside output directory
+    LOG_FILE_PATH="${OUTPUT_DIR}/${LOG_FILE}"
+    
     echo -e "${GREEN}Starting ${CALC_TYPE} calculation...${NC}"
     echo -e "${BLUE}Command: python3 ${SCRIPT_NAME}${NC}"
-    echo -e "${BLUE}Log file: ${LOG_FILE}${NC}"
+    echo -e "${BLUE}Log file: ${LOG_FILE_PATH}${NC}"
     echo ""
     
     if [ "$RUN_IN_BACKGROUND" = True ]; then
         # Run in background
         if [ "$VERBOSE" = True ]; then
-            python3 "${SCRIPT_NAME}" > "${LOG_FILE}" 2>&1 &
+            python3 "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 &
             PID=$!
             echo -e "${GREEN}✓ Calculation started in background (PID: ${PID})${NC}"
-            echo -e "${BLUE}Monitor with: tail -f ${LOG_FILE}${NC}"
+            echo -e "${BLUE}Monitor with: tail -f ${LOG_FILE_PATH}${NC}"
         else
-            python3 "${SCRIPT_NAME}" > "${LOG_FILE}" 2>&1 &
+            python3 "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 &
             echo -e "${GREEN}✓ Calculation started in background (PID: $!)${NC}"
         fi
     else
         # Run in foreground
         if [ "$VERBOSE" = True ]; then
-            python3 "${SCRIPT_NAME}" 2>&1 | tee "${LOG_FILE}"
+            python3 "${SCRIPT_NAME}" 2>&1 | tee "${LOG_FILE_PATH}"
         else
-            python3 "${SCRIPT_NAME}" > "${LOG_FILE}" 2>&1
+            python3 "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1
         fi
         
         # Check exit status
@@ -366,7 +374,7 @@ main() {
             echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${NC}"
             echo ""
             echo -e "${BLUE}Output directory: ${OUTPUT_DIR}/${NC}"
-            echo -e "${BLUE}Log file: ${LOG_FILE}${NC}"
+            echo -e "${BLUE}Log file: ${LOG_FILE_PATH}${NC}"
             echo ""
         else
             echo ""
@@ -374,7 +382,7 @@ main() {
             echo -e "${RED}✗ Calculation failed!${NC}"
             echo -e "${RED}═══════════════════════════════════════════════════════════════════${NC}"
             echo ""
-            echo -e "${YELLOW}Check log file for errors: ${LOG_FILE}${NC}"
+            echo -e "${YELLOW}Check log file for errors: ${LOG_FILE_PATH}${NC}"
             echo ""
             exit 1
         fi

@@ -42,7 +42,7 @@ SPIN = None
 
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
-XC_FUNCTIONAL = 'wb97x-d3bj'
+XC_FUNCTIONAL = 'wb97x'
 # Common options:
 #   'b3lyp'    - B3LYP (hybrid, good general purpose)
 #   'pbe0'     - PBE0 (hybrid, good for excited states)
@@ -54,14 +54,14 @@ XC_FUNCTIONAL = 'wb97x-d3bj'
 NUM_EXCITED_STATES = 10
 
 # --- TDDFT Method Selection ---
-USE_TDA = True
+USE_TDA = False
 # TDA (Tamm-Dancoff Approximation) is recommended for large systems or initial testing
 # For charged/open-shell systems, TDDFT automatically uses appropriate method
 # Closed-shell (spin=1): Uses RKS/TDDFT or RKS/TDA
 # Open-shell (spin>1): Uses UKS/TDDFT or UKS/TDA
 
 # --- Geometry Optimization Settings ---
-OPTIMISE_GEOMETRY = False
+OPTIMISE_GEOMETRY = True
 OPT_MAX_STEPS = 100
 OPT_CONV_PARAMS = 'tight'
 
@@ -116,7 +116,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'PTCDA_clean_wb97x_d3bj_6_31g__cpu_charge-1'
+OUTPUT_DIR = 'PTCDA_clean_wb97x_6_31g__cpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -254,9 +254,56 @@ print("\n" + "="*70)
 print("GEOMETRY & GROUND STATE SETUP")
 print("="*70)
 # ---------- 2a.  parse functional / dispersion --------------------
-m = re.search(r'-((?:d3bj|d3zero|d4))$', XC_FUNCTIONAL.lower())
-clean_xc  = XC_FUNCTIONAL[:m.start()] if m else XC_FUNCTIONAL
-disp_suffix = m.group(1) if m else None
+def parse_xc_functional(xc_string):
+    """
+    Parse XC functional string to separate base functional and dispersion correction.
+    
+    Based on PySCF official source (pyscf/scf/dispersion.py):
+    - Supported dispersion: d3bj, d3zero, d3bjm, d3zerom, d3op, d4
+    - NOT supported: wb97x-d, wb97x-d3 (these are in PySCF's blacklist)
+    - Special: wb97x-d3bj uses wb97x-v functional internally
+    
+    Examples:
+    - 'b3lyp'           -> ('b3lyp', None)
+    - 'b3lyp-d3bj'      -> ('b3lyp', 'd3bj')
+    - 'wb97x-d3bj'      -> ('wb97x', 'd3bj')  # PySCF handles wb97x-v mapping
+    - 'pbe0-d4'         -> ('pbe0', 'd4')
+    - 'cam-b3lyp-d3bj'  -> ('cam-b3lyp', 'd3bj')
+    
+    Returns: (clean_xc, dispersion_type)
+    """
+    xc_lower = xc_string.lower().strip()
+    
+    # PySCF blacklist - these are NOT supported
+    blacklist = {'wb97x-d', 'wb97x-d3', 'wb97x_d', 'wb97x_d3'}
+    if xc_lower in blacklist:
+        raise ValueError(
+            f"'{xc_string}' is NOT supported by PySCF.\n"
+            f"Use 'wb97x-d3bj' instead (recommended) or 'wb97x' without dispersion."
+        )
+    
+    # Supported dispersion versions (from PySCF DISP_VERSIONS)
+    # Order matters: longer/more specific patterns first
+    dispersion_patterns = [
+        (r'-d3bjm$', 'd3bjm'),         # d3bj modified
+        (r'-d3bj$', 'd3bj'),           # d3bj (Becke-Johnson damping)
+        (r'-d3zerom$', 'd3zerom'),     # d3zero modified  
+        (r'-d3zero$', 'd3zero'),       # d3 zero-damping
+        (r'-d3op$', 'd3op'),           # d3 optimized power
+        (r'-d4$', 'd4'),               # d4
+    ]
+    
+    for pattern, disp_type in dispersion_patterns:
+        match = re.search(pattern, xc_lower)
+        if match:
+            clean_xc = xc_string[:match.start()]
+            return clean_xc, disp_type
+    
+    # No dispersion suffix found
+    return xc_string, None
+
+clean_xc, disp_suffix = parse_xc_functional(XC_FUNCTIONAL)
+print(f"Parsed XC: '{XC_FUNCTIONAL}' -> base='{clean_xc}', dispersion='{disp_suffix}'")
 
 # ---------- 2b.  helper: build mf with current geometry ------------
 def build_mf(mol, verbose_level=VERBOSE_LEVEL):
@@ -869,8 +916,54 @@ def calculate_excited_state_density(td, state_id):
 # 5A. TRANSITION CONTRIBUTION ANALYSIS FUNCTIONS
 # ============================================================================
 
+def get_orbital_labels_single_spin(mo_occ, mo_coeff, spin_label=''):
+    """
+    Get orbital labels for a single spin channel.
+    Based on PySCF's official implementation.
+    
+    Args:
+        mo_occ: occupation numbers for this spin
+        mo_coeff: MO coefficients for this spin  
+        spin_label: 'α' or 'β' for labeling
+    
+    Returns:
+        labels: list of orbital labels
+        homo_idx: index of HOMO (0-indexed)
+        nocc: number of occupied orbitals
+    """
+    nmo = mo_coeff.shape[1]
+    homo_idx = np.where(mo_occ > 0)[0][-1]
+    nocc = homo_idx + 1
+    
+    labels = []
+    for i in range(nmo):
+        if i <= homo_idx:
+            offset = homo_idx - i
+            if offset == 0:
+                label = f'HOMO({spin_label})' if spin_label else 'HOMO'
+            else:
+                label = f'HOMO-{offset}({spin_label})' if spin_label else f'HOMO-{offset}'
+        else:
+            offset = i - homo_idx - 1
+            if offset == 0:
+                label = f'LUMO({spin_label})' if spin_label else 'LUMO'
+            else:
+                label = f'LUMO+{offset}({spin_label})' if spin_label else f'LUMO+{offset}'
+        labels.append(label)
+    
+    return labels, homo_idx, nocc
+
+
 def get_orbital_labels(mf):
-    """Get orbital labels (HOMO-n, LUMO+n) for RKS and UKS."""
+    """
+    Get orbital labels for cube file naming.
+    Works for both RKS and UKS systems.
+    For UKS, uses alpha spin labels (without spin designation for file naming).
+    
+    Returns:
+        labels: list of orbital labels (HOMO, LUMO, HOMO-1, etc.)
+        homo_idx: index of HOMO
+    """
     mo_occ = mf.mo_occ
     mo_coeff = mf.mo_coeff
     
@@ -880,7 +973,6 @@ def get_orbital_labels(mf):
     if isinstance(mo_coeff, tuple):
         mo_coeff = mo_coeff[0]
     
-    # Get number of orbitals from mo_coeff shape
     nmo = mo_coeff.shape[1]
     homo_idx = np.where(mo_occ > 0)[0][-1]
     
@@ -895,62 +987,126 @@ def get_orbital_labels(mf):
     
     return labels, homo_idx
 
-def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10):
+
+def analyze_single_spin_contribution(X, Y, labels, spin_label, threshold=0.01):
     """
-    Analyze orbital pair contributions to a specific excited state.
-    Handles both RKS and UKS systems.
+    Analyze contributions from a single spin channel.
+    Based on PySCF's official UHF TDDFT implementation.
+    
+    Args:
+        X: TDDFT X amplitudes (nocc x nvir)
+        Y: TDDFT Y amplitudes (nocc x nvir) or 0 for TDA
+        labels: orbital labels for this spin
+        spin_label: 'α' or 'β'
+        threshold: minimum weight to include
     
     Returns:
-        contributions: list of (occ_idx, vir_idx, weight, label) sorted by weight
-        total_weight: sum of all weights
+        list of (occ_idx, vir_idx, weight, label, spin)
     """
-    X, Y = td.xy[state_id]
-    
-    # Check if TDA (Y=0 as integer, not array)
+    # Check if TDA
     is_tda = not hasattr(Y, 'shape')
-    
-    # Handle UKS: X and Y are tuples (Xa, Xb), (Ya, Yb)
-    # For simplicity, analyze alpha spin (dominant for most cases)
-    if isinstance(X, tuple):
-        X, _ = X
-        if not is_tda:
-            Y, _ = Y
     
     nocc, nvir = X.shape
     
-    # For full TDDFT, the contribution is from (X + Y); for TDA, just X
+    # Calculate amplitudes: X+Y for full TDDFT, X for TDA
     amplitudes = X if is_tda else (X + Y)
     
-    # Calculate weights (squared amplitudes)
+    # Weights are squared amplitudes
     weights = amplitudes ** 2
     
-    # Get orbital labels
-    labels, homo_idx = get_orbital_labels(mf)
-    
-    # Collect all contributions
     contributions = []
     for i in range(nocc):
         for a in range(nvir):
             weight = weights[i, a]
             if weight > threshold:
-                occ_idx = i
-                vir_idx = nocc + a
+                occ_idx = i  # 0-indexed occupied orbital
+                vir_idx = nocc + a  # 0-indexed virtual orbital (absolute index)
                 occ_label = labels[occ_idx]
                 vir_label = labels[vir_idx]
                 transition_label = f"{occ_label} → {vir_label}"
-                contributions.append((occ_idx, vir_idx, weight, transition_label))
+                contributions.append((occ_idx, vir_idx, weight, transition_label, spin_label))
+    
+    return contributions
+
+
+def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10):
+    """
+    Analyze orbital pair contributions to a specific excited state.
+    Properly handles both RKS and UKS systems following PySCF's official implementation.
+    
+    Args:
+        td: TDDFT object
+        state_id: excited state index (0-indexed)
+        mf: mean-field object
+        threshold: minimum weight to include (default 0.01 = 1%)
+        top_n: number of top contributions to return
+    
+    Returns:
+        contributions: list of (occ_idx, vir_idx, weight, label, spin) sorted by weight
+        total_weight: sum of all weights
+    """
+    X, Y = td.xy[state_id]
+    
+    mo_occ = mf.mo_occ
+    mo_coeff = mf.mo_coeff
+    
+    # Check if UKS (unrestricted) - for UKS, X is a tuple of (Xa, Xb)
+    # This is more reliable than checking mo_occ which may vary by implementation
+    is_uks = isinstance(X, tuple) and len(X) == 2 and hasattr(X[0], 'shape')
+    
+    # For TDA, Y is 0 (scalar) or tuple of zeros
+    if is_uks:
+        # Check if TDA by looking at Y structure
+        is_tda = not isinstance(Y, tuple) or (isinstance(Y, tuple) and not hasattr(Y[0], 'shape'))
+    else:
+        is_tda = not hasattr(Y, 'shape')
+    
+    all_contributions = []
+    
+    if is_uks:
+        # UKS: analyze both spins
+        # Handle mo_occ/mo_coeff which can be tuple OR 2D array
+        if isinstance(mo_occ, tuple):
+            mo_occ_a, mo_occ_b = mo_occ
+        else:
+            mo_occ_a, mo_occ_b = mo_occ[0], mo_occ[1]
+        
+        if isinstance(mo_coeff, tuple):
+            mo_coeff_a, mo_coeff_b = mo_coeff
+        else:
+            mo_coeff_a, mo_coeff_b = mo_coeff[0], mo_coeff[1]
+        
+        Xa, Xb = X
+        Ya, Yb = (0, 0) if is_tda else Y
+        
+        # Get labels for both spins
+        labels_a, homo_a, nocc_a = get_orbital_labels_single_spin(mo_occ_a, mo_coeff_a, 'α')
+        labels_b, homo_b, nocc_b = get_orbital_labels_single_spin(mo_occ_b, mo_coeff_b, 'β')
+        
+        # Analyze alpha spin
+        contrib_a = analyze_single_spin_contribution(Xa, Ya, labels_a, 'α', threshold)
+        all_contributions.extend(contrib_a)
+        
+        # Analyze beta spin
+        contrib_b = analyze_single_spin_contribution(Xb, Yb, labels_b, 'β', threshold)
+        all_contributions.extend(contrib_b)
+        
+    else:
+        # RKS: single spin channel
+        labels, homo_idx, nocc = get_orbital_labels_single_spin(mo_occ, mo_coeff, '')
+        contrib = analyze_single_spin_contribution(X, Y, labels, '', threshold)
+        all_contributions.extend(contrib)
     
     # Sort by weight (descending)
-    contributions.sort(key=lambda x: x[2], reverse=True)
+    all_contributions.sort(key=lambda x: x[2], reverse=True)
     
     # Normalize weights to sum to 1
-    total_weight = sum(c[2] for c in contributions)
+    total_weight = sum(c[2] for c in all_contributions)
     if total_weight > 0:
-        contributions = [(occ, vir, w/total_weight, label) 
-                         for occ, vir, w, label in contributions]
+        all_contributions = [(occ, vir, w/total_weight, label, spin) 
+                             for occ, vir, w, label, spin in all_contributions]
     
-    # Return top N
-    return contributions[:top_n], total_weight
+    return all_contributions[:top_n], total_weight
 
 def calculate_pair_transition_density(mf, occ_idx, vir_idx):
     """
@@ -1076,16 +1232,20 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
             print(f"\n{'='*70}")
             print(f"STATE {state_id+1}: {excitation_energy:.4f} eV")
             print(f"{'='*70}")
-            print(f"{'Rank':<6} {'Transition':<20} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}")
+            print(f"{'Rank':<6} {'Transition':<30} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}")
             print(f"{'-'*70}")
             
             cumulative = 0.0
-            for rank, (occ_idx, vir_idx, weight, label) in enumerate(contributions, 1):
+            for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
                 cumulative += weight
-                print(f"{rank:<6} {label:<20} {weight:<12.6f} {weight*100:<12.2f}% {cumulative*100:<12.2f}%")
+                print(f"{rank:<6} {label:<30} {weight:<12.6f} {weight*100:<11.2f} % {cumulative*100:<11.2f} %")
             
             print(f"{'-'*70}")
             print(f"Total weight analyzed: {total_weight:.6f}")
+            
+            # Compare with PySCF output
+            print(f"\nNote: Compare with PySCF's TDDFT output above where coefficients are amplitudes,")
+            print(f"      and contributions = (amplitude)²")
         
         # Save contribution tables to file
         table_file = os.path.join(OUTPUT_DIR, 'contribution_tables.txt')
@@ -1101,16 +1261,17 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
                 f.write(f"\n{'='*70}\n")
                 f.write(f"STATE {state_id+1}: {excitation_energy:.4f} eV\n")
                 f.write(f"{'='*70}\n")
-                f.write(f"{'Rank':<6} {'Transition':<20} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}\n")
+                f.write(f"{'Rank':<6} {'Transition':<30} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}\n")
                 f.write(f"{'-'*70}\n")
                 
                 cumulative = 0.0
-                for rank, (occ_idx, vir_idx, weight, label) in enumerate(contributions, 1):
+                for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
                     cumulative += weight
-                    f.write(f"{rank:<6} {label:<20} {weight:<12.6f} {weight*100:<12.2f}% {cumulative*100:<12.2f}%\n")
+                    f.write(f"{rank:<6} {label:<30} {weight:<12.6f} {weight*100:<11.2f} % {cumulative*100:<11.2f} %\n")
                 
                 f.write(f"{'-'*70}\n")
                 f.write(f"Total weight analyzed: {total_weight:.6f}\n")
+                f.write(f"Note: Contributions = (TDDFT amplitude)²\n")
                 f.write(f"{'='*70}\n\n")
         
         print(f"\n✓ Contribution tables saved to: {table_file}")
@@ -1442,7 +1603,7 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
         print(f"\nState {state_id+1} ({excitation_energy:.4f} eV):")
         
         pair_count = 0
-        for rank, (occ_idx, vir_idx, weight, label) in enumerate(contributions, 1):
+        for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
             if pair_count >= MAX_PAIRS_PER_STATE:
                 break
             
