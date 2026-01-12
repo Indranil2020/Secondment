@@ -1,108 +1,127 @@
 #!/bin/bash
 ################################################################################
-# UNIFIED TDDFT CALCULATION CONTROL SCRIPT
+# UNIFIED DFT/TDDFT CALCULATION CONTROL SCRIPT
 ################################################################################
-# This script provides centralized control for both CPU and GPU TDDFT calculations.
+# This script provides centralized control for both CPU and GPU calculations.
 # Configure all settings here, then the script will automatically update and run
 # the appropriate Python script (CPU or GPU).
+#
+# WORKFLOW: Input Structure → [Optimization] → [DFT] → [TDDFT] → Output
+#           Each stage can be enabled/disabled independently
 ################################################################################
-# Set CUDA 12.9 library path
+
+# Set CUDA 12.9 library path (for GPU calculations)
 export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
+
 # ============================================================================
-# CALCULATION CONFIGURATION
+#                    SECTION 1: CALCULATION STAGE CONTROL
 # ============================================================================
+# Control which calculation stages to run. Valid combinations:
+#   Opt only:      OPTIMISE_GEOMETRY=True,  ENABLE_DFT=False, ENABLE_TDDFT=False
+#   DFT only:      OPTIMISE_GEOMETRY=False, ENABLE_DFT=True,  ENABLE_TDDFT=False
+#   Opt + DFT:     OPTIMISE_GEOMETRY=True,  ENABLE_DFT=True,  ENABLE_TDDFT=False
+#   DFT + TDDFT:   OPTIMISE_GEOMETRY=False, ENABLE_DFT=True,  ENABLE_TDDFT=True
+#   Full workflow: OPTIMISE_GEOMETRY=True,  ENABLE_DFT=True,  ENABLE_TDDFT=True
+# Note: TDDFT requires DFT (auto-enabled if ENABLE_TDDFT=True)
+# ----------------------------------------------------------------------------
+ENABLE_DFT=False                 # Run ground state DFT calculation
+ENABLE_TDDFT=False               # Run TDDFT excited state calculation
 
-# --- Molecule Selection ---
-USE_XYZ=True                    # True: use XYZ file, False: use H2O test molecule
-XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (if USE_XYZ=True)
-# XYZ_FILE="H2O.xyz"      # Path to XYZ file (if USE_XYZ=True)
-BASIS_SET="6-31g*"               # Basis set: 6-31g, 6-31g*, def2-SVP, etc.
+# ============================================================================
+#                    SECTION 2: INPUT STRUCTURE
+# ============================================================================
+USE_XYZ=True                    # True: use XYZ file, False: use built-in H2O test
+# XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (relative or absolute)
+XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"
+# XYZ_FILE="H2O.xyz"            # Alternative: small test molecule
 
-# --- Charge and Spin Settings ---
-# CHARGE can be:
-#   - Single value: CHARGE=-1
-#   - Multiple values (batch): CHARGE="0 1 -1"
-# For batch mode, the script will run calculations for each charge automatically
-CHARGE="0 -1"                       # Molecular charge: 0 (neutral), +1 (cation), -1 (anion)
-                                # For batch: CHARGE="0 1 -1" (space-separated)
-SPIN=None                       # Spin multiplicity (2S+1): None=auto, 1=singlet, 2=doublet, 3=triplet
+# ============================================================================
+#                    SECTION 3: ELECTRONIC STRUCTURE
+# ============================================================================
+# --- Charge and Spin ---
+CHARGE="0 -1"                      # Molecular charge: 0, +1, -1, or batch "0 1 -1"
+SPIN=None                       # Spin multiplicity: None=auto, 1=singlet, 2=doublet
 
-# --- DFT/TDDFT Settings ---
+# --- Basis Set ---
+BASIS_SET="6-31g*"              # Options: 6-31g, 6-31g*, 6-311g**, def2-SVP, def2-TZVP
+
+# --- DFT Functional ---
 # Supported dispersion: -d3bj, -d3zero, -d3bjm, -d3zerom, -d3op, -d4
-# NOT supported by PySCF: wb97x-d, wb97x-d3 (use wb97x-d3bj instead)
-XC_FUNCTIONAL="wb97x-d3bj"           # Examples: b3lyp, b3lyp-d3bj, pbe0-d4, cam-b3lyp-d3bj, wb97x-d3bj
-NUM_EXCITED_STATES=10           # Number of excited states to calculate
+# NOT supported: wb97x-d, wb97x-d3 (use wb97x-d3bj instead)
+XC_FUNCTIONAL="wb97x-d3bj"      # Examples: b3lyp, pbe0, cam-b3lyp, wb97x-d3bj
+
+# ============================================================================
+#                    SECTION 4: GEOMETRY OPTIMIZATION
+# ============================================================================
+OPTIMISE_GEOMETRY=True          # True: optimize geometry, False: use input as-is
+OPT_CYCLES=5                    # Number of optimization cycles (output N → input N+1)
+OPT_MAX_STEPS=150               # Max steps per optimization cycle
+OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose"
+                                #   tight:  energy 1e-6, gradient 3e-4
+                                #   normal: energy 1e-5, gradient 1e-3
+                                #   loose:  energy 1e-4, gradient 3e-3
+
+# ============================================================================
+#                    SECTION 5: TDDFT SETTINGS
+# ============================================================================
+NUM_EXCITED_STATES=10           # Number of excited states to calculate (0 = skip TDDFT)
 USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
-# USE_TDA=True                   # True: TDA (faster), False: Full TDDFT (more accurate)
 
-# --- Geometry Optimization Settings ---
-# OPTIMISE_GEOMETRY=True          # True: optimize geometry before DFT, False: use input geometry
-OPTIMISE_GEOMETRY=False          # True: optimize geometry before DFT, False: use input geometry
-OPT_MAX_STEPS=100               # Maximum optimization steps
-OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose", or custom dict
-                                # tight: energy 1e-6, gradient 3e-4
-                                # normal: energy 1e-5, gradient 1e-3
-                                # loose: energy 1e-4, gradient 3e-3
+# ============================================================================
+#                    SECTION 6: OUTPUT GENERATION
+# ============================================================================
+# --- Ground State Outputs ---
+GENERATE_GROUND_STATE_DENSITY=True      # Ground state electron density cube
+GENERATE_ELECTROSTATIC_POTENTIAL=True   # Electrostatic potential (ESP) cube
+GENERATE_DEFORMATION_DENSITY=True       # Deformation density (SCF - Promolecule)
+GENERATE_HOMO_LUMO=True                 # HOMO/LUMO orbital cubes
 
-# --- Verbose/Debug Settings ---
-VERBOSE_LEVEL=4                # 0: minimal, 1: normal, 2: detailed (8 decimal energy), 3: debug
-                                # Level 2+ shows: optimization steps, SCF iterations, energy convergence
+# --- Excited State Outputs ---
+STATES_TO_OUTPUT="0 1 2"                # States for cube files (0-indexed, space-separated)
+GENERATE_TRANSITION_DENSITY=True        # Transition density matrix cubes
+GENERATE_EXCITED_DENSITY=True           # Excited state density cubes
+GENERATE_DENSITY_DIFFERENCE=True        # Density difference cubes (excited - ground)
 
-# --- Output Selection ---
-# Which states to generate CUBE FILES for (0-indexed, space-separated)
-# Example: "0 1 2" for first three states
-STATES_TO_OUTPUT="0 1 2"
+# --- NTO Analysis ---
+ENABLE_NTO_ANALYSIS=True                # Generate NTO molden files
+NTO_STATES="0 1 2"                      # States for NTO analysis (0-indexed)
 
-# --- Cube File Generation Options ---
-GENERATE_TRANSITION_DENSITY=True    # Transition density matrix
-GENERATE_EXCITED_DENSITY=True       # Excited state density
-GENERATE_DENSITY_DIFFERENCE=True    # Density difference (excited - ground)
-GENERATE_HOMO_LUMO=True             # HOMO and LUMO orbitals
+# --- Transition Contribution Analysis ---
+ENABLE_CONTRIBUTION_ANALYSIS=True       # Analyze orbital pair contributions
+CONTRIBUTION_STATES="0 1 2"             # States to analyze
+CONTRIBUTION_THRESHOLD=0.01             # Show contributions > 1%
+TOP_N_CONTRIBUTIONS=10                  # Show top N orbital pairs
+GENERATE_PAIR_CUBES=True                # Generate cube files for orbital pairs
+MAX_PAIRS_PER_STATE=3                   # Max cubes per state
+PAIR_CONTRIBUTION_CUTOFF=0.05           # Only pairs > 5%
 
-# --- Grid Settings ---
-USE_GRID_RESOLUTION=False       # True: use fixed resolution, False: use spacing
+# ============================================================================
+#                    SECTION 7: GRID SETTINGS (for cube files)
+# ============================================================================
+USE_GRID_RESOLUTION=False       # True: fixed resolution, False: use spacing
 GRID_RESOLUTION_X=80            # Grid points in X (if USE_GRID_RESOLUTION=True)
 GRID_RESOLUTION_Y=80            # Grid points in Y
 GRID_RESOLUTION_Z=80            # Grid points in Z
-BOX_MARGIN=4.0                  # Margin around molecule in Angstrom
-GRID_SPACING=0.2                # Grid spacing in Angstrom
+BOX_MARGIN=4.0                  # Margin around molecule (Angstrom)
+GRID_SPACING=0.2                # Grid spacing (Angstrom)
 
-# --- NTO Analysis ---
-ENABLE_NTO_ANALYSIS=True        # Generate NTO molden files
-NTO_STATES="0 1 2"              # Which states for NTO analysis (0-indexed, space-separated)
-
-# --- Transition Contribution Analysis ---
-ENABLE_CONTRIBUTION_ANALYSIS=True   # Analyze orbital pair contributions
-CONTRIBUTION_STATES="0 1 2"         # Which states to analyze (0-indexed, space-separated)
-CONTRIBUTION_THRESHOLD=0.01         # Show contributions > 1%
-TOP_N_CONTRIBUTIONS=10              # Show top N orbital pairs
-GENERATE_PAIR_CUBES=True            # Generate cube files for orbital pairs
-MAX_PAIRS_PER_STATE=3               # Generate cubes for top N pairs per state
-PAIR_CONTRIBUTION_CUTOFF=0.05       # Only generate cubes for pairs > 5%
-
-# --- Ground State Density and Potential ---
-GENERATE_GROUND_STATE_DENSITY=True      # Generate ground state charge density cube
-GENERATE_ELECTROSTATIC_POTENTIAL=True   # Generate electrostatic potential (ESP) cube
-GENERATE_DEFORMATION_DENSITY=True       # Generate deformation density (SCF - Promolecule)
+# ============================================================================
+#                    SECTION 8: EXECUTION SETTINGS
+# ============================================================================
+# --- Hardware Selection ---
+USE_GPU=True                    # True: GPU (faster), False: CPU
 
 # --- Parallel Settings ---
-NUM_THREADS=0                   # Number of CPU threads (0=auto-detect)
+NUM_THREADS=0                   # CPU threads (0=auto-detect)
 
-# ============================================================================
-# EXECUTION CONTROL
-# ============================================================================
-
-# --- CPU or GPU Selection ---
-# USE_GPU=True
-USE_GPU=False
+# --- Verbosity ---
+VERBOSE_LEVEL=4                 # 0: minimal, 1: normal, 2: detailed, 3: debug, 4: max
 
 # --- Output Control ---
-LOG_FILE="calculation.log"      # Log file name (auto-generated with timestamp)
-AUTO_TIMESTAMP=True             # True: Add timestamp to log file name
-
-# --- Execution Options ---
-RUN_IN_BACKGROUND=False         # True: Run in background, False: Run in foreground
-VERBOSE=True                    # True: Show progress, False: Quiet mode
+LOG_FILE="calculation.log"      # Log file name
+AUTO_TIMESTAMP=True             # Add timestamp to log file name
+RUN_IN_BACKGROUND=False         # Run in background
+VERBOSE=True                    # Show progress
 
 ################################################################################
 # DO NOT EDIT BELOW THIS LINE (unless you know what you're doing)
@@ -185,25 +204,30 @@ with open('${script}', 'r') as f:
 
 # Update configurations
 updates = {
+    # Section 1: Calculation Stage Control
+    'ENABLE_DFT': '${ENABLE_DFT}',
+    'ENABLE_TDDFT': '${ENABLE_TDDFT}',
+    # Section 2: Input Structure
     'USE_XYZ': '${USE_XYZ}',
     'XYZ_FILE': "'${XYZ_FILE}'",
+    # Section 3: Electronic Structure
     'BASIS_SET': "'${BASIS_SET}'",
     'CHARGE': '${CHARGE}',
     'SPIN': '${SPIN}',
     'XC_FUNCTIONAL': "'${XC_FUNCTIONAL}'",
-    'NUM_EXCITED_STATES': '${NUM_EXCITED_STATES}',
-    'USE_TDA': '${USE_TDA}',
+    # Section 4: Geometry Optimization
     'OPTIMISE_GEOMETRY': '${OPTIMISE_GEOMETRY}',
+    'OPT_CYCLES': '${OPT_CYCLES}',
     'OPT_MAX_STEPS': '${OPT_MAX_STEPS}',
     'OPT_CONV_PARAMS': "'${OPT_CONV_PARAMS}'",
-    'VERBOSE_LEVEL': '${VERBOSE_LEVEL}',
+    # Section 5: TDDFT Settings
+    'NUM_EXCITED_STATES': '${NUM_EXCITED_STATES}',
+    'USE_TDA': '${USE_TDA}',
+    # Section 6: Output Generation
     'GENERATE_TRANSITION_DENSITY': '${GENERATE_TRANSITION_DENSITY}',
     'GENERATE_EXCITED_DENSITY': '${GENERATE_EXCITED_DENSITY}',
     'GENERATE_DENSITY_DIFFERENCE': '${GENERATE_DENSITY_DIFFERENCE}',
     'GENERATE_HOMO_LUMO': '${GENERATE_HOMO_LUMO}',
-    'USE_GRID_RESOLUTION': '${USE_GRID_RESOLUTION}',
-    'BOX_MARGIN': '${BOX_MARGIN}',
-    'GRID_SPACING': '${GRID_SPACING}',
     'ENABLE_NTO_ANALYSIS': '${ENABLE_NTO_ANALYSIS}',
     'ENABLE_CONTRIBUTION_ANALYSIS': '${ENABLE_CONTRIBUTION_ANALYSIS}',
     'CONTRIBUTION_THRESHOLD': '${CONTRIBUTION_THRESHOLD}',
@@ -214,7 +238,13 @@ updates = {
     'GENERATE_GROUND_STATE_DENSITY': '${GENERATE_GROUND_STATE_DENSITY}',
     'GENERATE_ELECTROSTATIC_POTENTIAL': '${GENERATE_ELECTROSTATIC_POTENTIAL}',
     'GENERATE_DEFORMATION_DENSITY': '${GENERATE_DEFORMATION_DENSITY}',
+    # Section 7: Grid Settings
+    'USE_GRID_RESOLUTION': '${USE_GRID_RESOLUTION}',
+    'BOX_MARGIN': '${BOX_MARGIN}',
+    'GRID_SPACING': '${GRID_SPACING}',
+    # Section 8: Execution Settings
     'NUM_THREADS': '${NUM_THREADS}',
+    'VERBOSE_LEVEL': '${VERBOSE_LEVEL}',
     'OUTPUT_DIR': "'${OUTPUT_DIR}'",
 }
 

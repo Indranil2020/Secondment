@@ -37,7 +37,7 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'PTCDA_clean.xyz'
+XYZ_FILE = 'opt/charge0/wb97x_d3bj/optimised_structure.xyz'
 BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
@@ -49,7 +49,7 @@ SPIN = None
 
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
-XC_FUNCTIONAL = 'wb97x'
+XC_FUNCTIONAL = 'wb97x-d3bj'
 # Common options:
 #   'b3lyp'    - B3LYP (hybrid, good general purpose)
 #   'pbe0'     - PBE0 (hybrid, good for excited states)
@@ -63,9 +63,22 @@ NUM_EXCITED_STATES = 10
 # --- TDDFT Method Selection ---
 USE_TDA = False
 
+# --- Calculation Stage Control ---
+# These switches control which calculation stages to run
+# Valid combinations:
+#   OPTIMISE_GEOMETRY=True,  ENABLE_DFT=False, ENABLE_TDDFT=False  -> Optimization only
+#   OPTIMISE_GEOMETRY=False, ENABLE_DFT=True,  ENABLE_TDDFT=False  -> DFT only (single point)
+#   OPTIMISE_GEOMETRY=True,  ENABLE_DFT=True,  ENABLE_TDDFT=False  -> Optimization + DFT
+#   OPTIMISE_GEOMETRY=True,  ENABLE_DFT=True,  ENABLE_TDDFT=True   -> Full workflow (Opt + DFT + TDDFT)
+#   OPTIMISE_GEOMETRY=False, ENABLE_DFT=True,  ENABLE_TDDFT=True   -> DFT + TDDFT (no optimization)
+# Note: TDDFT requires DFT (ENABLE_DFT is automatically set to True if ENABLE_TDDFT=True)
+ENABLE_DFT = False
+ENABLE_TDDFT = False
+
 # --- Geometry Optimization Settings ---
 OPTIMISE_GEOMETRY = True
-OPT_MAX_STEPS = 100
+OPT_CYCLES = 5
+OPT_MAX_STEPS = 150
 OPT_CONV_PARAMS = 'tight'
 
 # --- Verbose/Debug Settings ---
@@ -125,7 +138,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'PTCDA_clean_wb97x_6_31g__gpu_charge-1'
+OUTPUT_DIR = 'optimised_structure_wb97x_d3bj_6_31g__gpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -352,7 +365,8 @@ if OPTIMISE_GEOMETRY:
     print("\n" + "-"*70)
     print("GEOMETRY OPTIMIZATION")
     print("-"*70)
-    print(f"Max steps: {OPT_MAX_STEPS}")
+    print(f"Optimization cycles: {OPT_CYCLES}")
+    print(f"Max steps per cycle: {OPT_MAX_STEPS}")
     print(f"Convergence: {OPT_CONV_PARAMS}")
     if VERBOSE_LEVEL >= 2:
         conv_params = get_opt_conv_params(OPT_CONV_PARAMS)
@@ -360,38 +374,79 @@ if OPTIMISE_GEOMETRY:
         print(f"  Gradient RMS:      {conv_params['convergence_grms']:.1e} a.u./Bohr")
     print("-"*70)
     
-    print("Optimising geometry with dispersion-corrected forces...")
+    # Run multiple optimization cycles if requested
+    for opt_cycle in range(1, OPT_CYCLES + 1):
+        if OPT_CYCLES > 1:
+            print(f"\n--- Optimization Cycle {opt_cycle}/{OPT_CYCLES} ---")
+        
+        print("Optimising geometry with dispersion-corrected forces...")
+        mf = build_mf(mol)
+        conv_params = get_opt_conv_params(OPT_CONV_PARAMS)
+        mol = opt_kernel(mf, maxsteps=OPT_MAX_STEPS, **conv_params)
+        
+        # Save optimised structure (intermediate cycles get numbered)
+        if OPT_CYCLES > 1:
+            opt_xyz = os.path.join(OUTPUT_DIR, f'optimised_structure_cycle{opt_cycle}.xyz')
+        else:
+            opt_xyz = os.path.join(OUTPUT_DIR, 'optimised_structure.xyz')
+        mol.tofile(opt_xyz, format='xyz')
+        print(f"✓ Optimised geometry saved to: {opt_xyz}")
+    
+    # Always save final structure as optimised_structure.xyz for downstream use
+    if OPT_CYCLES > 1:
+        final_xyz = os.path.join(OUTPUT_DIR, 'optimised_structure.xyz')
+        mol.tofile(final_xyz, format='xyz')
+        print(f"✓ Final optimised geometry saved to: {final_xyz}")
+
+# ---------- 2e.  Enforce calculation stage dependencies -----------------
+# TDDFT requires DFT
+if ENABLE_TDDFT and not ENABLE_DFT:
+    print("Note: ENABLE_TDDFT=True requires DFT. Setting ENABLE_DFT=True automatically.")
+    ENABLE_DFT = True
+
+# If only optimization requested, skip DFT and TDDFT
+if not ENABLE_DFT and not ENABLE_TDDFT:
+    if OPTIMISE_GEOMETRY:
+        print("\n" + "="*70)
+        print("OPTIMIZATION ONLY MODE - Skipping DFT and TDDFT")
+        print("="*70)
+        print(f"Final optimised structure: {os.path.join(OUTPUT_DIR, 'optimised_structure.xyz')}")
+        print("\n✓ Calculation completed (optimization only)")
+        import sys
+        sys.exit(0)
+    else:
+        print("ERROR: No calculation stages enabled. Set at least one of:")
+        print("  - OPTIMISE_GEOMETRY=True")
+        print("  - ENABLE_DFT=True")
+        print("  - ENABLE_TDDFT=True")
+        import sys
+        sys.exit(1)
+
+# ---------- 2f.  final SCF (only one kernel call) -----------------
+if ENABLE_DFT:
+    print("\n" + "-"*70)
+    print("GROUND STATE DFT CALCULATION")
+    print("-"*70)
+    print(f"XC functional: {XC_FUNCTIONAL} (clean: {clean_xc})")
+    print(f"Dispersion: {disp_suffix if disp_suffix else 'None'}")
+    print(f"Basis set: {BASIS_SET}")
+    print(f"Method: {dft_method}")
+    print("-"*70)
+
     mf = build_mf(mol)
-    conv_params = get_opt_conv_params(OPT_CONV_PARAMS)
-    mol = opt_kernel(mf, maxsteps=OPT_MAX_STEPS, **conv_params)
-    opt_xyz = os.path.join(OUTPUT_DIR, 'optimised_structure.xyz')
-    mol.tofile(opt_xyz, format='xyz')
-    print(f"✓ Optimised geometry saved to: {opt_xyz}")
+    mf.kernel()
 
-# ---------- 2e.  final SCF (only one kernel call) -----------------
-print("\n" + "-"*70)
-print("GROUND STATE DFT CALCULATION")
-print("-"*70)
-print(f"XC functional: {XC_FUNCTIONAL} (clean: {clean_xc})")
-print(f"Dispersion: {disp_suffix if disp_suffix else 'None'}")
-print(f"Basis set: {BASIS_SET}")
-print(f"Method: {dft_method}")
-print("-"*70)
+    if not mf.converged:
+        print("⚠ WARNING: SCF did not converge!")
+        print("  Try: 1) Different initial guess, 2) Level shifting, 3) DIIS settings")
+    else:
+        print("✓ SCF converged")
 
-mf = build_mf(mol)
-mf.kernel()
-
-if not mf.converged:
-    print("⚠ WARNING: SCF did not converge!")
-    print("  Try: 1) Different initial guess, 2) Level shifting, 3) DIIS settings")
-else:
-    print("✓ SCF converged")
-
-# Print energy with precision based on verbose level
-if VERBOSE_LEVEL >= 2:
-    print(f"✓ Ground-state energy: {mf.e_tot:.8f} a.u.")
-else:
-    print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
+    # Print energy with precision based on verbose level
+    if VERBOSE_LEVEL >= 2:
+        print(f"✓ Ground-state energy: {mf.e_tot:.8f} a.u.")
+    else:
+        print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
 
 # # ============================================================================
 # # 2. GROUND STATE DFT CALCULATION
@@ -437,7 +492,7 @@ else:
 # 2A. GROUND STATE DENSITY AND ELECTROSTATIC POTENTIAL
 # ============================================================================
 
-if GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTENTIAL or GENERATE_DEFORMATION_DENSITY:
+if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTENTIAL or GENERATE_DEFORMATION_DENSITY):
     print("\n" + "="*70)
     print("GROUND STATE DENSITY AND POTENTIAL")
     print("="*70)
@@ -612,6 +667,20 @@ if GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTENTIAL or GENERATE
 # ============================================================================
 # 3. TDDFT CALCULATION
 # ============================================================================
+
+if not ENABLE_TDDFT or NUM_EXCITED_STATES <= 0:
+    # Skip TDDFT - DFT only mode
+    print("\n" + "="*70)
+    print("TDDFT SKIPPED")
+    print("="*70)
+    if not ENABLE_TDDFT:
+        print("Reason: ENABLE_TDDFT = False")
+    else:
+        print("Reason: NUM_EXCITED_STATES = 0")
+    print("\n✓ Calculation completed (DFT only)")
+    print(f"✓ All files saved to: {OUTPUT_DIR}/\n")
+    import sys
+    sys.exit(0)
 
 print("\n" + "="*70)
 print("TDDFT CALCULATION")
