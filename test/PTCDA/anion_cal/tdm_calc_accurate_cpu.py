@@ -72,6 +72,17 @@ USE_TDA = False
 ENABLE_DFT = True               # Run ground state DFT calculation
 ENABLE_TDDFT = True             # Run TDDFT excited state calculation (requires DFT)
 
+# --- Emission Calculation Settings ---
+# Emission = fluorescence from excited state minimum geometry
+# Requires: 1) Optimize excited state geometry, 2) Calculate emission energy at that geometry
+# ENABLE_EMISSION: Calculate emission energy (requires ENABLE_TDDFT=True)
+# EMISSION_STATE: Which excited state to optimize for emission (0-indexed, typically 0 for S1)
+# EMISSION_OPT_MAX_STEPS: Max steps for excited state geometry optimization
+ENABLE_EMISSION = True
+EMISSION_STATE = 0              # 0 = S1 (first excited state)
+EMISSION_OPT_MAX_STEPS = 100    # Max steps for excited state optimization
+EMISSION_OPT_CONV = 'tight'     # Convergence: 'tight', 'normal', 'loose'
+
 # --- Geometry Optimization Settings ---
 OPTIMISE_GEOMETRY = True
 OPT_CYCLES = 1                  # Number of optimization cycles (output of cycle N feeds into cycle N+1)
@@ -723,15 +734,132 @@ else:  # RKS: scalar
 td.analyze()  # Print detailed analysis
 
 # Print excitation energies with precision based on verbose level
+# These are ABSORPTION energies (vertical excitation from ground state geometry)
 print("\n" + "="*70)
-print("EXCITED STATE ENERGIES")
+print("ABSORPTION ENERGIES (Vertical Excitation)")
 print("="*70)
+print("Ground state geometry → Excited state (Franck-Condon)")
+absorption_energies = {}
 for i, energy in enumerate(td.e):
+    absorption_energies[i] = energy * 27.211  # Store in eV
     if VERBOSE_LEVEL >= 2:
-        print(f"State {i+1}: {energy:.8f} a.u. = {energy*27.211:.6f} eV")
+        print(f"State S{i+1}: {energy:.8f} a.u. = {energy*27.211:.6f} eV")
     else:
-        print(f"State {i+1}: {energy:.6f} a.u. = {energy*27.211:.3f} eV")
+        print(f"State S{i+1}: {energy:.6f} a.u. = {energy*27.211:.3f} eV")
 print("="*70)
+
+# Store ground state total energy for emission calculation
+ground_state_energy_gs_geom = mf.e_tot
+
+# ============================================================================
+# 3B. EMISSION CALCULATION (Excited State Geometry Optimization)
+# ============================================================================
+
+emission_energies = {}
+emission_mol = None  # Will store the optimized excited state geometry
+
+if ENABLE_EMISSION and ENABLE_TDDFT:
+    print("\n" + "="*70)
+    print("EMISSION CALCULATION")
+    print("="*70)
+    print(f"Optimizing geometry of excited state S{EMISSION_STATE+1}...")
+    print(f"This calculates the emission (fluorescence) energy")
+    print("-"*70)
+    
+    # Validate emission state
+    if EMISSION_STATE >= NUM_EXCITED_STATES:
+        print(f"ERROR: EMISSION_STATE={EMISSION_STATE} but only {NUM_EXCITED_STATES} states calculated")
+        print(f"Setting EMISSION_STATE to {NUM_EXCITED_STATES-1}")
+        EMISSION_STATE = NUM_EXCITED_STATES - 1
+    
+    # Import geometry optimization
+    from pyscf.geomopt.geometric_solver import optimize as geom_optimize
+    
+    # Create TDDFT gradient scanner for excited state optimization
+    print(f"Setting up excited state gradient for S{EMISSION_STATE+1}...")
+    
+    # Create gradient scanner for the specified excited state
+    # state parameter is 1-indexed in PySCF gradient
+    excited_grad = td.nuc_grad_method().as_scanner(state=EMISSION_STATE+1)
+    
+    print(f"Optimizing S{EMISSION_STATE+1} geometry...")
+    print(f"  Max steps: {EMISSION_OPT_MAX_STEPS}")
+    print(f"  Convergence: {EMISSION_OPT_CONV}")
+    
+    # Get convergence parameters
+    conv_params = get_opt_conv_params(EMISSION_OPT_CONV)
+    
+    # Optimize excited state geometry
+    emission_mol = geom_optimize(excited_grad, maxsteps=EMISSION_OPT_MAX_STEPS, **conv_params)
+    
+    # Save optimized excited state geometry
+    excited_xyz = os.path.join(OUTPUT_DIR, f'excited_state_S{EMISSION_STATE+1}_geometry.xyz')
+    emission_mol.tofile(excited_xyz, format='xyz')
+    print(f"✓ Excited state geometry saved to: {excited_xyz}")
+    
+    # Now calculate emission energy at the optimized excited state geometry
+    print("\n" + "-"*70)
+    print("Calculating emission energy at excited state geometry...")
+    print("-"*70)
+    
+    # Build DFT at excited state geometry
+    if actual_spin == 1:
+        mf_emission = dft.RKS(emission_mol)
+    else:
+        mf_emission = dft.UKS(emission_mol)
+    mf_emission.xc = XC_FUNCTIONAL
+    mf_emission.grids.level = 3
+    mf_emission.verbose = 0
+    mf_emission.kernel()
+    
+    # Calculate TDDFT at excited state geometry
+    if USE_TDA:
+        td_emission = tddft.TDA(mf_emission)
+    else:
+        td_emission = tddft.TDDFT(mf_emission)
+    td_emission.nstates = NUM_EXCITED_STATES
+    td_emission.verbose = 0
+    td_emission.kernel()
+    
+    # Emission energy is the excitation energy at the excited state geometry
+    # This represents the vertical de-excitation (fluorescence)
+    print("\n" + "="*70)
+    print("EMISSION ENERGIES (Vertical De-excitation)")
+    print("="*70)
+    print("Excited state geometry → Ground state (Fluorescence)")
+    for i, energy in enumerate(td_emission.e):
+        emission_energies[i] = energy * 27.211  # Store in eV
+        if VERBOSE_LEVEL >= 2:
+            print(f"State S{i+1}: {energy:.8f} a.u. = {energy*27.211:.6f} eV")
+        else:
+            print(f"State S{i+1}: {energy:.6f} a.u. = {energy*27.211:.3f} eV")
+    print("="*70)
+    
+    # Calculate Stokes shift
+    print("\n" + "="*70)
+    print("STOKES SHIFT (Absorption - Emission)")
+    print("="*70)
+    for i in range(min(len(absorption_energies), len(emission_energies))):
+        stokes = absorption_energies[i] - emission_energies[i]
+        print(f"State S{i+1}: {stokes:.6f} eV = {stokes*8065.544:.1f} cm⁻¹")
+    print("="*70)
+    
+    # Summary table
+    print("\n" + "="*70)
+    print("ABSORPTION vs EMISSION SUMMARY")
+    print("="*70)
+    print(f"{'State':<8} {'Absorption (eV)':<18} {'Emission (eV)':<18} {'Stokes (eV)':<15} {'Stokes (cm⁻¹)':<15}")
+    print("-"*70)
+    for i in range(min(len(absorption_energies), len(emission_energies))):
+        abs_e = absorption_energies[i]
+        emi_e = emission_energies[i]
+        stokes = abs_e - emi_e
+        stokes_cm = stokes * 8065.544
+        print(f"S{i+1:<7} {abs_e:<18.6f} {emi_e:<18.6f} {stokes:<15.6f} {stokes_cm:<15.1f}")
+    print("="*70)
+
+elif ENABLE_EMISSION and not ENABLE_TDDFT:
+    print("\nNote: ENABLE_EMISSION=True but ENABLE_TDDFT=False. Skipping emission calculation.")
 
 # ============================================================================
 # 4. TRANSITION DIPOLE MOMENTS

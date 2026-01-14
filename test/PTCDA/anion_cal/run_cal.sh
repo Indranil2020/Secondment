@@ -24,15 +24,17 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
 #   Full workflow: OPTIMISE_GEOMETRY=True,  ENABLE_DFT=True,  ENABLE_TDDFT=True
 # Note: TDDFT requires DFT (auto-enabled if ENABLE_TDDFT=True)
 # ----------------------------------------------------------------------------
-ENABLE_DFT=False                 # Run ground state DFT calculation
-ENABLE_TDDFT=False               # Run TDDFT excited state calculation
+ENABLE_DFT=True                 # Run ground state DFT calculation
+ENABLE_TDDFT=True               # Run TDDFT excited state calculation
 
 # ============================================================================
 #                    SECTION 2: INPUT STRUCTURE
 # ============================================================================
 USE_XYZ=True                    # True: use XYZ file, False: use built-in H2O test
 # XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (relative or absolute)
-XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"
+# XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"
+XYZ_FILE="optimised_structure_wb97x_d3bj_6_31g__gpu_charge0/optimised_structure.xyz"
+
 # XYZ_FILE="H2O.xyz"            # Alternative: small test molecule
 
 # ============================================================================
@@ -53,7 +55,7 @@ XC_FUNCTIONAL="wb97x-d3bj"      # Examples: b3lyp, pbe0, cam-b3lyp, wb97x-d3bj
 # ============================================================================
 #                    SECTION 4: GEOMETRY OPTIMIZATION
 # ============================================================================
-OPTIMISE_GEOMETRY=True          # True: optimize geometry, False: use input as-is
+OPTIMISE_GEOMETRY=False          # True: optimize geometry, False: use input as-is
 OPT_CYCLES=5                    # Number of optimization cycles (output N → input N+1)
 OPT_MAX_STEPS=150               # Max steps per optimization cycle
 OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose"
@@ -66,6 +68,14 @@ OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose"
 # ============================================================================
 NUM_EXCITED_STATES=10           # Number of excited states to calculate (0 = skip TDDFT)
 USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
+
+# --- Emission Calculation ---
+# Emission = fluorescence from excited state minimum geometry
+# Requires excited state geometry optimization + TDDFT at that geometry
+ENABLE_EMISSION=True            # Calculate emission energy (requires ENABLE_TDDFT=True)
+EMISSION_STATE=0                # Which state to optimize (0=S1, 1=S2, etc.)
+EMISSION_OPT_MAX_STEPS=200      # Max steps for excited state optimization
+EMISSION_OPT_CONV="tight"       # Convergence: "tight", "normal", "loose"
 
 # ============================================================================
 #                    SECTION 6: OUTPUT GENERATION
@@ -223,6 +233,11 @@ updates = {
     # Section 5: TDDFT Settings
     'NUM_EXCITED_STATES': '${NUM_EXCITED_STATES}',
     'USE_TDA': '${USE_TDA}',
+    # Section 5b: Emission Calculation
+    'ENABLE_EMISSION': '${ENABLE_EMISSION}',
+    'EMISSION_STATE': '${EMISSION_STATE}',
+    'EMISSION_OPT_MAX_STEPS': '${EMISSION_OPT_MAX_STEPS}',
+    'EMISSION_OPT_CONV': "'${EMISSION_OPT_CONV}'",
     # Section 6: Output Generation
     'GENERATE_TRANSITION_DENSITY': '${GENERATE_TRANSITION_DENSITY}',
     'GENERATE_EXCITED_DENSITY': '${GENERATE_EXCITED_DENSITY}',
