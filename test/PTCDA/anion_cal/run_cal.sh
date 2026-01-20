@@ -33,7 +33,8 @@ ENABLE_TDDFT=True               # Run TDDFT excited state calculation
 USE_XYZ=True                    # True: use XYZ file, False: use built-in H2O test
 # XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (relative or absolute)
 # XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"
-XYZ_FILE="optimised_structure_wb97x_d3bj_6_31g__gpu_charge0/optimised_structure.xyz"
+# XYZ_FILE="emission/optimised_structure_wb97x_d3bj_6_31g__gpu_charge0/optimised_structure.xyz"
+XYZ_FILE="emission/optimised_structure_wb97x_d3bj_6_31g__gpu_charge-1/optimised_structure.xyz"
 
 # XYZ_FILE="H2O.xyz"            # Alternative: small test molecule
 
@@ -41,7 +42,7 @@ XYZ_FILE="optimised_structure_wb97x_d3bj_6_31g__gpu_charge0/optimised_structure.
 #                    SECTION 3: ELECTRONIC STRUCTURE
 # ============================================================================
 # --- Charge and Spin ---
-CHARGE="0 -1"                      # Molecular charge: 0, +1, -1, or batch "0 1 -1"
+CHARGE="-1"                      # Molecular charge: 0, +1, -1, or batch "0 1 -1"
 SPIN=None                       # Spin multiplicity: None=auto, 1=singlet, 2=doublet
 
 # --- Basis Set ---
@@ -66,14 +67,14 @@ OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose"
 # ============================================================================
 #                    SECTION 5: TDDFT SETTINGS
 # ============================================================================
-NUM_EXCITED_STATES=10           # Number of excited states to calculate (0 = skip TDDFT)
+NUM_EXCITED_STATES=3           # Number of excited states to calculate (0 = skip TDDFT) it was 10
 USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more accurate)
 
 # --- Emission Calculation ---
 # Emission = fluorescence from excited state minimum geometry
 # Requires excited state geometry optimization + TDDFT at that geometry
 ENABLE_EMISSION=True            # Calculate emission energy (requires ENABLE_TDDFT=True)
-EMISSION_STATE=0                # Which state to optimize (0=S1, 1=S2, etc.)
+EMISSION_STATE=1                # Which state to optimize (0=S1, 1=S2, etc.)
 EMISSION_OPT_MAX_STEPS=200      # Max steps for excited state optimization
 EMISSION_OPT_CONV="tight"       # Convergence: "tight", "normal", "loose"
 
@@ -100,7 +101,7 @@ NTO_STATES="0 1 2"                      # States for NTO analysis (0-indexed)
 ENABLE_CONTRIBUTION_ANALYSIS=True       # Analyze orbital pair contributions
 CONTRIBUTION_STATES="0 1 2"             # States to analyze
 CONTRIBUTION_THRESHOLD=0.01             # Show contributions > 1%
-TOP_N_CONTRIBUTIONS=10                  # Show top N orbital pairs
+TOP_N_CONTRIBUTIONS=5                  # Show top N orbital pairs it was 10
 GENERATE_PAIR_CUBES=True                # Generate cube files for orbital pairs
 MAX_PAIRS_PER_STATE=3                   # Max cubes per state
 PAIR_CONTRIBUTION_CUTOFF=0.05           # Only pairs > 5%
