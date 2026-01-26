@@ -21,7 +21,8 @@ from gpu4pyscf import dft
 from gpu4pyscf.tdscf import rks as gpu_tdrks, uks as gpu_tduks
 import numpy as np
 from functools import reduce
-from dftd3.pyscf import DFTD3Dispersion as disp
+# Note: Dispersion correction is handled via mf.disp='d3bj' (PySCF built-in)
+# External DFTD3 library is NOT required for standard dispersion calculations
 import re
 import os
 
@@ -37,7 +38,7 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'emission/optimised_structure_wb97x_d3bj_6_31g__gpu_charge-1/optimised_structure.xyz'
+XYZ_FILE = 'H2O.xyz'
 BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
@@ -58,7 +59,7 @@ XC_FUNCTIONAL = 'wb97x-d3bj'
 #   'pbe'      - PBE (GGA, faster but less accurate)
 #   'blyp'     - BLYP (GGA)
 
-NUM_EXCITED_STATES = 3
+NUM_EXCITED_STATES = 5
 
 # --- TDDFT Method Selection ---
 USE_TDA = False
@@ -82,7 +83,7 @@ ENABLE_TDDFT = True
 # EMISSION_STATE: Which excited state to optimize for emission (0-indexed, typically 0 for S1)
 # EMISSION_OPT_MAX_STEPS: Max steps for excited state geometry optimization
 ENABLE_EMISSION = True
-EMISSION_STATE = 1
+EMISSION_STATE = 0
 EMISSION_OPT_MAX_STEPS = 200
 EMISSION_OPT_CONV = 'tight'
 
@@ -149,7 +150,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'optimised_structure_wb97x_d3bj_6_31g__gpu_charge-1'
+OUTPUT_DIR = 'H2O_wb97x_d3bj_6_31g__gpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -206,6 +207,13 @@ def calculate_spin_multiplicity(n_electrons, charge):
     
     Returns:
         spin: Spin multiplicity (2S+1)
+    
+    WARNING: This assumes singlet for even electrons and doublet for odd.
+    This may be incorrect for:
+    - Diradicals (e.g., O2 is triplet despite even electrons)
+    - Transition metal complexes with high-spin configurations
+    - Open-shell singlets
+    For such systems, explicitly set SPIN in the configuration.
     """
     # Adjust electron count for charge
     n_elec = n_electrons - charge
@@ -258,6 +266,10 @@ if USE_XYZ:
     print(f"Charge: {CHARGE}")
     mol, calculated_spin = create_molecule_from_xyz(XYZ_FILE, BASIS_SET, CHARGE, SPIN)
     actual_spin = calculated_spin
+    # Warn if spin was auto-detected for even-electron system
+    if SPIN is None and mol.nelectron % 2 == 0:
+        print("  ⚠️  Note: Spin auto-detected as singlet for even-electron system.")
+        print("     If this is a diradical/triplet (e.g., O2), set SPIN=3 explicitly.")
 else:
     print("Using H2O test molecule")
     print(f"Basis set: {BASIS_SET}")
@@ -602,8 +614,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         try:
             # Get promolecule density (superposition of atomic densities)
             # This is the non-interacting atomic density (no electron-electron interaction)
-            if SPIN == 0:
-                # RKS: use scf.hf.init_guess_by_atom
+            if actual_spin == 1:
+                # RKS: use scf.hf.init_guess_by_atom for closed-shell systems
                 from pyscf import scf as pyscf_scf
                 dm_promol = pyscf_scf.hf.init_guess_by_atom(mol)
                 dm_promol = np.asarray(dm_promol, dtype=np.float64)
@@ -865,10 +877,12 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
             td_for_grad = gpu_tduks.TDDFT(mf)
     
     td_for_grad.nstates = NUM_EXCITED_STATES
-    td_for_grad.conv_tol = 1e-4  # Relaxed TDDFT convergence for gradient (1e-4 vs 1e-6)
+    td_for_grad.conv_tol = 1e-5  # Relaxed TDDFT convergence for gradient (1e-5 provides good balance)
     td_for_grad.max_cycle = 200  # More iterations allowed
     td_for_grad.verbose = VERBOSE_LEVEL
-    td_for_grad.kernel()
+    # NOTE: Do NOT call td_for_grad.kernel() here - the gradient scanner will 
+    # run TDDFT at each geometry step automatically. Calling it here would be
+    # redundant and waste significant computation time.
     
     td_grad = td_for_grad.nuc_grad_method()
     td_grad.chkfile = None  # Pre-set chkfile
@@ -889,6 +903,19 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
     emission_mol = geom_optimize(excited_grad, maxsteps=EMISSION_OPT_MAX_STEPS, 
                                   assert_convergence=False, **conv_params)
     
+    # Check optimization convergence and warn if not converged
+    # geomeTRIC stores convergence info in the mol object
+    opt_converged = getattr(emission_mol, 'converged', None)
+    if opt_converged is False:
+        print("\n" + "!"*70)
+        print("⚠️  WARNING: Excited state geometry optimization did NOT converge!")
+        print("   Emission energies and Stokes shifts may be inaccurate!")
+        print("   Consider increasing EMISSION_OPT_MAX_STEPS or relaxing convergence criteria.")
+        print("!"*70 + "\n")
+    elif opt_converged is None:
+        # Try alternative convergence check
+        print("  Note: Could not verify optimization convergence status.")
+    
     # Save optimized excited state geometry
     excited_xyz = os.path.join(OUTPUT_DIR, f'excited_state_S{EMISSION_STATE+1}_geometry.xyz')
     emission_mol.tofile(excited_xyz, format='xyz')
@@ -901,36 +928,41 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
     print("Calculating emission energy at excited state geometry (GPU)...")
     print("-"*70)
     
-    # Build DFT at excited state geometry using PySCF then convert to GPU
-    # This ensures proper type compatibility with GPU TDDFT
+    # Build DFT at excited state geometry using GPU4PySCF directly
+    # IMPORTANT: Use clean_xc and disp_suffix for consistency with ground state
+    # Note: emission_mol from geomeTRIC is a PySCF mol object
+    # We need to ensure we get a proper GPU4PySCF mf object for TDDFT
     from pyscf import dft as pyscf_dft
     if actual_spin == 1:
-        mf_emission = pyscf_dft.RKS(emission_mol)
+        # Create PySCF mf first, then convert to GPU
+        mf_emission_cpu = pyscf_dft.RKS(emission_mol, xc=clean_xc)
     else:
-        mf_emission = pyscf_dft.UKS(emission_mol)
-    mf_emission.xc = XC_FUNCTIONAL
-    mf_emission.grids.level = 3
-    mf_emission.verbose = 0
+        mf_emission_cpu = pyscf_dft.UKS(emission_mol, xc=clean_xc)
+    # Apply dispersion correction if used in ground state (CRITICAL for consistency)
+    if disp_suffix:
+        mf_emission_cpu.disp = disp_suffix
+    # Use same grid level as ground state mf for consistency
+    mf_emission_cpu.grids.level = mf.grids.level
+    mf_emission_cpu.verbose = 0
     # Convert to GPU and run
-    mf_emission = mf_emission.to_gpu()
+    mf_emission = mf_emission_cpu.to_gpu()
     mf_emission.kernel()
     
     print(f"  Ground state energy at excited geometry: {mf_emission.e_tot:.8f} a.u.")
     
     # Calculate GPU TDDFT at excited state geometry
-    # Use .to_gpu() pattern for proper type handling
-    from pyscf import tddft as pyscf_tddft
+    # Use GPU4PySCF TDDFT classes directly
+    # IMPORTANT: Pass the converged mf object, not the scanner
     if actual_spin == 1:
         if USE_TDA:
-            td_emission = pyscf_tddft.TDA(mf_emission.to_cpu())
+            td_emission = gpu_tdrks.TDA(mf_emission)
         else:
-            td_emission = pyscf_tddft.TDDFT(mf_emission.to_cpu())
+            td_emission = gpu_tdrks.TDDFT(mf_emission)
     else:
         if USE_TDA:
-            td_emission = pyscf_tddft.TDA(mf_emission.to_cpu())
+            td_emission = gpu_tduks.TDA(mf_emission)
         else:
-            td_emission = pyscf_tddft.TDDFT(mf_emission.to_cpu())
-    td_emission = td_emission.to_gpu()
+            td_emission = gpu_tduks.TDDFT(mf_emission)
     td_emission.nstates = NUM_EXCITED_STATES
     td_emission.verbose = VERBOSE_LEVEL
     td_emission.conv_tol = 1e-6
@@ -954,9 +986,14 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
     print("\n" + "="*70)
     print("STOKES SHIFT (Absorption - Emission)")
     print("="*70)
+    print(f"⚠️  NOTE: Only S{EMISSION_STATE+1} Stokes shift is physically meaningful!")
+    print(f"   Geometry was optimized for S{EMISSION_STATE+1} only.")
+    print(f"   Other states' Stokes shifts are calculated at S{EMISSION_STATE+1} geometry.")
+    print("-"*70)
     for i in range(min(len(absorption_energies), len(emission_energies))):
         stokes = absorption_energies[i] - emission_energies[i]
-        print(f"State S{i+1}: {stokes:.6f} eV = {stokes*8065.544:.1f} cm⁻¹")
+        validity = "✓ (valid)" if i == EMISSION_STATE else "(at S{} geom)".format(EMISSION_STATE+1)
+        print(f"State S{i+1}: {stokes:.6f} eV = {stokes*8065.544:.1f} cm⁻¹  {validity}")
     print("="*70)
     
     # Summary table
@@ -990,8 +1027,8 @@ coords = mol.atom_coords()  # in a.u.
 nuc_charge_center = np.einsum('z,zx->x', charges, coords) / charges.sum()
 mol.set_common_orig_(nuc_charge_center)
 
-# Calculate dipole integrals
-dip_ints = mol.intor('cint1e_r_sph', comp=3)  # x, y, z components
+# Calculate dipole integrals (int1e_r is the modern PySCF interface)
+dip_ints = mol.intor('int1e_r', comp=3)  # x, y, z components
 
 def calculate_transition_dipole(td, state_id):
     """
@@ -1128,7 +1165,7 @@ if td_emission is not None:
     emission_coords = emission_mol.atom_coords()
     emission_nuc_center = np.einsum('z,zx->x', emission_charges, emission_coords) / emission_charges.sum()
     emission_mol.set_common_orig_(emission_nuc_center)
-    dip_ints_emission = emission_mol.intor('cint1e_r_sph', comp=3)
+    dip_ints_emission = emission_mol.intor('int1e_r', comp=3)
     
     # Helper function for emission TDMs using emission geometry
     def calculate_emission_tdm(td_em, state_id, dip_ints_em):
@@ -1310,6 +1347,9 @@ def calculate_excited_state_density(td, state_id):
     Based on PySCF examples/tddft/22-density.py
     Handles both RKS and UKS, converts CuPy to NumPy.
     
+    For UKS: ρ_excited = ρ_ground + Δρ where Δρ comes from X,Y amplitudes
+    This is the TOTAL electron density in the excited state, NOT the transition density.
+    
     Parameters:
     -----------
     td : TDDFT object
@@ -1318,7 +1358,7 @@ def calculate_excited_state_density(td, state_id):
     Returns:
     --------
     dm_excited : ndarray
-        Excited state density matrix in AO basis
+        Excited state density matrix in AO basis (total density, alpha+beta summed)
     """
     X, Y = td.xy[state_id]
     mf = td._scf
@@ -1327,9 +1367,92 @@ def calculate_excited_state_density(td, state_id):
     is_uks = isinstance(X, tuple)
     
     if is_uks:
-        # UKS case - simplified approach: use transition density
-        # For visualization, transition density is more meaningful
-        return calculate_transition_density_matrix(td, state_id)
+        # UKS case - PROPER excited state density calculation
+        # ρ_excited = ρ_ground + Δρ_alpha + Δρ_beta
+        # where Δρ comes from the TDDFT response (X,Y amplitudes)
+        
+        # Extract alpha and beta components
+        Xa, Xb = X
+        
+        # Check if TDA (Y=0 as integer, not array)
+        is_tda = not isinstance(Y, tuple) or (isinstance(Y, tuple) and not hasattr(Y[0], 'shape'))
+        if is_tda:
+            Ya = Yb = 0
+        else:
+            Ya, Yb = Y
+        
+        # Handle tuple or array format for mo_coeff/mo_occ
+        if isinstance(mo_coeff, tuple):
+            mo_coeff_a, mo_coeff_b = mo_coeff
+        else:
+            mo_coeff_np = mo_coeff.get() if hasattr(mo_coeff, 'get') else mo_coeff
+            mo_coeff_a, mo_coeff_b = mo_coeff_np[0], mo_coeff_np[1]
+        
+        if isinstance(mo_occ, tuple):
+            mo_occ_a, mo_occ_b = mo_occ
+        else:
+            mo_occ_np = mo_occ.get() if hasattr(mo_occ, 'get') else mo_occ
+            mo_occ_a, mo_occ_b = mo_occ_np[0], mo_occ_np[1]
+        
+        # Convert CuPy to NumPy
+        if hasattr(mo_coeff_a, 'get'):
+            mo_coeff_a = mo_coeff_a.get()
+            mo_coeff_b = mo_coeff_b.get()
+        if hasattr(mo_occ_a, 'get'):
+            mo_occ_a = mo_occ_a.get()
+            mo_occ_b = mo_occ_b.get()
+        if hasattr(Xa, 'get'):
+            Xa = Xa.get()
+            Xb = Xb.get()
+        if not is_tda and hasattr(Ya, 'get'):
+            Ya = Ya.get()
+            Yb = Yb.get()
+        
+        mo_coeff_a = np.asarray(mo_coeff_a)
+        mo_coeff_b = np.asarray(mo_coeff_b)
+        mo_occ_a = np.asarray(mo_occ_a)
+        mo_occ_b = np.asarray(mo_occ_b)
+        
+        # Calculate alpha spin contribution
+        nocc_a = Xa.shape[0]
+        nmo_a = mo_coeff_a.shape[1]
+        
+        # Density matrix changes in MO basis for alpha
+        dm_oo_a = -np.einsum('ia,ka->ik', Xa.conj(), Xa)
+        dm_vv_a = np.einsum('ia,ic->ac', Xa, Xa.conj())
+        if not is_tda:
+            dm_oo_a -= np.einsum('ia,ka->ik', Ya.conj(), Ya)
+            dm_vv_a += np.einsum('ia,ic->ac', Ya, Ya.conj())
+        
+        # Ground state density in MO basis (alpha)
+        dm_mo_a = np.diag(mo_occ_a)
+        dm_mo_a[:nocc_a, :nocc_a] += dm_oo_a
+        dm_mo_a[nocc_a:, nocc_a:] += dm_vv_a
+        
+        # Transform to AO basis
+        dm_ao_a = np.einsum('pi,ij,qj->pq', mo_coeff_a, dm_mo_a, mo_coeff_a.conj())
+        
+        # Calculate beta spin contribution
+        nocc_b = Xb.shape[0]
+        nmo_b = mo_coeff_b.shape[1]
+        
+        dm_oo_b = -np.einsum('ia,ka->ik', Xb.conj(), Xb)
+        dm_vv_b = np.einsum('ia,ic->ac', Xb, Xb.conj())
+        if not is_tda:
+            dm_oo_b -= np.einsum('ia,ka->ik', Yb.conj(), Yb)
+            dm_vv_b += np.einsum('ia,ic->ac', Yb, Yb.conj())
+        
+        # Ground state density in MO basis (beta)
+        dm_mo_b = np.diag(mo_occ_b)
+        dm_mo_b[:nocc_b, :nocc_b] += dm_oo_b
+        dm_mo_b[nocc_b:, nocc_b:] += dm_vv_b
+        
+        # Transform to AO basis
+        dm_ao_b = np.einsum('pi,ij,qj->pq', mo_coeff_b, dm_mo_b, mo_coeff_b.conj())
+        
+        # Total excited state density = alpha + beta
+        dm_excited = dm_ao_a + dm_ao_b
+        
     else:
         # RKS case
         # Convert CuPy to NumPy
@@ -1358,7 +1481,7 @@ def calculate_excited_state_density(td, state_id):
         # Start with ground state density in MO basis
         dm = np.diag(mo_occ)
         
-        # Add TDDFT contribution
+        # Add TDDFT contribution (factor of 2 for RKS due to spin degeneracy)
         dm[:nocc, :nocc] += dm_oo * 2
         dm[nocc:, nocc:] += dm_vv * 2
         
@@ -1371,7 +1494,7 @@ def calculate_excited_state_density(td, state_id):
 # 5A. TRANSITION CONTRIBUTION ANALYSIS FUNCTIONS
 # ============================================================================
 
-def get_orbital_labels_single_spin(mo_occ, mo_coeff, spin_label=''):
+def get_orbital_labels_single_spin(mo_occ, mo_coeff, spin_label='', mo_energy=None):
     """
     Get orbital labels for a single spin channel.
     Based on PySCF's official implementation.
@@ -1380,21 +1503,30 @@ def get_orbital_labels_single_spin(mo_occ, mo_coeff, spin_label=''):
         mo_occ: occupation numbers for this spin
         mo_coeff: MO coefficients for this spin  
         spin_label: 'α' or 'β' for labeling
+        mo_energy: orbital energies (optional, for enhanced output)
     
     Returns:
         labels: list of orbital labels
         homo_idx: index of HOMO (0-indexed)
         nocc: number of occupied orbitals
+        energies_eV: orbital energies in eV (or None if not provided)
     """
     # Convert CuPy to NumPy if needed
     if hasattr(mo_occ, 'get'):
         mo_occ = mo_occ.get()
     if hasattr(mo_coeff, 'get'):
         mo_coeff = mo_coeff.get()
+    if mo_energy is not None and hasattr(mo_energy, 'get'):
+        mo_energy = mo_energy.get()
     
     nmo = mo_coeff.shape[1]
     homo_idx = np.where(mo_occ > 0)[0][-1]
     nocc = homo_idx + 1
+    
+    # Convert energies to eV if provided
+    energies_eV = None
+    if mo_energy is not None:
+        energies_eV = np.asarray(mo_energy) * 27.211  # Hartree to eV
     
     labels = []
     for i in range(nmo):
@@ -1412,7 +1544,7 @@ def get_orbital_labels_single_spin(mo_occ, mo_coeff, spin_label=''):
                 label = f'LUMO+{offset}({spin_label})' if spin_label else f'LUMO+{offset}'
         labels.append(label)
     
-    return labels, homo_idx, nocc
+    return labels, homo_idx, nocc, energies_eV
 
 
 def get_orbital_labels(mf):
@@ -1455,7 +1587,7 @@ def get_orbital_labels(mf):
     return labels, homo_idx
 
 
-def analyze_single_spin_contribution(X, Y, labels, spin_label, threshold=0.01):
+def analyze_single_spin_contribution(X, Y, labels, spin_label, threshold=0.01, energies_eV=None):
     """
     Analyze contributions from a single spin channel.
     Based on PySCF's official UHF TDDFT implementation.
@@ -1466,9 +1598,10 @@ def analyze_single_spin_contribution(X, Y, labels, spin_label, threshold=0.01):
         labels: orbital labels for this spin
         spin_label: 'α' or 'β'
         threshold: minimum weight to include
+        energies_eV: orbital energies in eV (optional)
     
     Returns:
-        list of (occ_idx, vir_idx, weight, label, spin)
+        list of (occ_idx, vir_idx, weight, label, spin, occ_energy, vir_energy)
     """
     # Check if TDA
     is_tda = not hasattr(Y, 'shape')
@@ -1497,7 +1630,12 @@ def analyze_single_spin_contribution(X, Y, labels, spin_label, threshold=0.01):
                 occ_label = labels[occ_idx]
                 vir_label = labels[vir_idx]
                 transition_label = f"{occ_label} → {vir_label}"
-                contributions.append((occ_idx, vir_idx, weight, transition_label, spin_label))
+                
+                # Get orbital energies if available
+                occ_energy = energies_eV[occ_idx] if energies_eV is not None else None
+                vir_energy = energies_eV[vir_idx] if energies_eV is not None else None
+                
+                contributions.append((occ_idx, vir_idx, weight, transition_label, spin_label, occ_energy, vir_energy))
     
     return contributions
 
@@ -1515,13 +1653,14 @@ def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10)
         top_n: number of top contributions to return
     
     Returns:
-        contributions: list of (occ_idx, vir_idx, weight, label, spin) sorted by weight
+        contributions: list of (occ_idx, vir_idx, weight, label, spin, occ_energy, vir_energy) sorted by weight
         total_weight: sum of all weights
     """
     X, Y = td.xy[state_id]
     
     mo_occ = mf.mo_occ
     mo_coeff = mf.mo_coeff
+    mo_energy = mf.mo_energy
     
     # Check if UKS (unrestricted) - for UKS, X is a tuple of (Xa, Xb)
     # This is more reliable than checking mo_occ which may be a CuPy array
@@ -1538,7 +1677,7 @@ def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10)
     
     if is_uks:
         # UKS: analyze both spins
-        # Handle mo_occ/mo_coeff which can be tuple OR 2D array (for GPU)
+        # Handle mo_occ/mo_coeff/mo_energy which can be tuple OR 2D array (for GPU)
         if isinstance(mo_occ, tuple):
             mo_occ_a, mo_occ_b = mo_occ
         else:
@@ -1553,25 +1692,31 @@ def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10)
             mo_coeff_np = mo_coeff.get() if hasattr(mo_coeff, 'get') else mo_coeff
             mo_coeff_a, mo_coeff_b = mo_coeff_np[0], mo_coeff_np[1]
         
+        if isinstance(mo_energy, tuple):
+            mo_energy_a, mo_energy_b = mo_energy
+        else:
+            mo_energy_np = mo_energy.get() if hasattr(mo_energy, 'get') else mo_energy
+            mo_energy_a, mo_energy_b = mo_energy_np[0], mo_energy_np[1]
+        
         Xa, Xb = X
         Ya, Yb = (0, 0) if is_tda else Y
         
-        # Get labels for both spins
-        labels_a, homo_a, nocc_a = get_orbital_labels_single_spin(mo_occ_a, mo_coeff_a, 'α')
-        labels_b, homo_b, nocc_b = get_orbital_labels_single_spin(mo_occ_b, mo_coeff_b, 'β')
+        # Get labels for both spins (with energies)
+        labels_a, homo_a, nocc_a, energies_a = get_orbital_labels_single_spin(mo_occ_a, mo_coeff_a, 'α', mo_energy_a)
+        labels_b, homo_b, nocc_b, energies_b = get_orbital_labels_single_spin(mo_occ_b, mo_coeff_b, 'β', mo_energy_b)
         
         # Analyze alpha spin
-        contrib_a = analyze_single_spin_contribution(Xa, Ya, labels_a, 'α', threshold)
+        contrib_a = analyze_single_spin_contribution(Xa, Ya, labels_a, 'α', threshold, energies_a)
         all_contributions.extend(contrib_a)
         
         # Analyze beta spin
-        contrib_b = analyze_single_spin_contribution(Xb, Yb, labels_b, 'β', threshold)
+        contrib_b = analyze_single_spin_contribution(Xb, Yb, labels_b, 'β', threshold, energies_b)
         all_contributions.extend(contrib_b)
         
     else:
         # RKS: single spin channel
-        labels, homo_idx, nocc = get_orbital_labels_single_spin(mo_occ, mo_coeff, '')
-        contrib = analyze_single_spin_contribution(X, Y, labels, '', threshold)
+        labels, homo_idx, nocc, energies = get_orbital_labels_single_spin(mo_occ, mo_coeff, '', mo_energy)
+        contrib = analyze_single_spin_contribution(X, Y, labels, '', threshold, energies)
         all_contributions.extend(contrib)
     
     # Sort by weight (descending)
@@ -1580,17 +1725,24 @@ def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10)
     # Normalize weights to sum to 1
     total_weight = sum(c[2] for c in all_contributions)
     if total_weight > 0:
-        all_contributions = [(occ, vir, w/total_weight, label, spin) 
-                             for occ, vir, w, label, spin in all_contributions]
+        all_contributions = [(occ, vir, w/total_weight, label, spin, occ_e, vir_e) 
+                             for occ, vir, w, label, spin, occ_e, vir_e in all_contributions]
     
     return all_contributions[:top_n], total_weight
 
-def calculate_pair_transition_density(mf, occ_idx, vir_idx):
+def calculate_pair_transition_density(mf, occ_idx, vir_idx, spin='alpha'):
     """
     Calculate transition density matrix for a single orbital pair i→a.
-    Handles both RKS and UKS (uses alpha spin for UKS), and CuPy arrays.
+    Handles both RKS and UKS with proper spin channel selection.
     
     T_μν = C_μ^i × C_ν^a + C_μ^a × C_ν^i
+    
+    Parameters:
+    -----------
+    mf : mean-field object
+    occ_idx : int, occupied orbital index (0-indexed within spin channel)
+    vir_idx : int, virtual orbital index (absolute index within spin channel)
+    spin : str, 'alpha' or 'beta' for UKS systems (ignored for RKS)
     
     Returns NumPy array in AO basis.
     """
@@ -1603,30 +1755,41 @@ def calculate_pair_transition_density(mf, occ_idx, vir_idx):
     # Ensure we have NumPy array
     mo_coeff = np.asarray(mo_coeff)
     
-    # Handle UKS (use alpha spin)
-    # UKS can be: tuple (dm_alpha, dm_beta) OR array with shape (2, nao, nmo)
+    # Determine if UKS and select appropriate spin channel
+    is_uks = False
     if isinstance(mo_coeff, tuple):
-        mo_coeff_alpha = mo_coeff[0]
+        is_uks = True
+        mo_coeff_alpha = np.asarray(mo_coeff[0])
+        mo_coeff_beta = np.asarray(mo_coeff[1])
     elif mo_coeff.ndim == 3 and mo_coeff.shape[0] == 2:
         # GPU4PySCF UKS format: (2, nao, nmo)
-        mo_coeff_alpha = mo_coeff[0]
+        is_uks = True
+        mo_coeff_alpha = np.asarray(mo_coeff[0])
+        mo_coeff_beta = np.asarray(mo_coeff[1])
     else:
         # RKS: single 2D array
-        mo_coeff_alpha = mo_coeff
+        mo_coeff_use = mo_coeff
     
-    # Ensure alpha coefficients are 2D
-    mo_coeff_alpha = np.asarray(mo_coeff_alpha)
-    if mo_coeff_alpha.ndim != 2:
-        raise ValueError(f"mo_coeff_alpha must be 2D, got shape {mo_coeff_alpha.shape}, ndim={mo_coeff_alpha.ndim}")
+    # Select spin channel for UKS
+    if is_uks:
+        if spin.lower() == 'beta':
+            mo_coeff_use = mo_coeff_beta
+        else:
+            mo_coeff_use = mo_coeff_alpha
+    
+    # Ensure coefficients are 2D
+    mo_coeff_use = np.asarray(mo_coeff_use)
+    if mo_coeff_use.ndim != 2:
+        raise ValueError(f"mo_coeff must be 2D, got shape {mo_coeff_use.shape}, ndim={mo_coeff_use.ndim}")
     
     # Check if indices are valid
-    nao, nmo = mo_coeff_alpha.shape
+    nao, nmo = mo_coeff_use.shape
     if occ_idx >= nmo or vir_idx >= nmo:
         raise IndexError(f"Orbital indices out of range: occ_idx={occ_idx}, vir_idx={vir_idx}, but only {nmo} MOs available (nao={nao})")
     
     # Extract specific orbitals
-    occ_mo = mo_coeff_alpha[:, occ_idx]
-    vir_mo = mo_coeff_alpha[:, vir_idx]
+    occ_mo = mo_coeff_use[:, occ_idx]
+    vir_mo = mo_coeff_use[:, vir_idx]
     
     # Transition density matrix for this pair in AO basis
     # T_μν = C_μ^i × C_ν^a + C_μ^a × C_ν^i (symmetric)
@@ -1711,52 +1874,64 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
             
             all_contributions[state_id] = (contributions, total_weight)
             
-            # Print contribution table
-            print(f"\n{'='*70}")
+            # Print contribution table with orbital indices and energies
+            print(f"\n{'='*100}")
             print(f"ABSORPTION STATE {state_id+1}: {excitation_energy:.4f} eV")
-            print(f"{'='*70}")
-            print(f"{'Rank':<6} {'Transition':<30} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}")
-            print(f"{'-'*70}")
+            print(f"{'='*100}")
+            print(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}")
+            print(f"{'-'*100}")
             
             cumulative = 0.0
-            for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
+            for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
                 cumulative += weight
-                print(f"{rank:<6} {label:<30} {weight:<12.6f} {weight*100:<11.2f} % {cumulative*100:<11.2f} %")
+                idx_str = f"{occ_idx}→{vir_idx}"
+                delta_e = (vir_e - occ_e) if (occ_e is not None and vir_e is not None) else 0.0
+                occ_e_str = f"{occ_e:.3f}" if occ_e is not None else "N/A"
+                vir_e_str = f"{vir_e:.3f}" if vir_e is not None else "N/A"
+                delta_e_str = f"{delta_e:.3f}" if (occ_e is not None and vir_e is not None) else "N/A"
+                print(f"{rank:<5} {idx_str:<8} {label:<28} {occ_e_str:<12} {vir_e_str:<12} {delta_e_str:<10} {weight:<10.4f} {weight*100:<7.2f}%")
             
-            print(f"{'-'*70}")
+            print(f"{'-'*100}")
             print(f"Total weight analyzed: {total_weight:.6f}")
+            print(f"Cumulative weight shown: {cumulative*100:.2f}%")
             
-            # Compare with PySCF output
-            print(f"\nNote: Compare with PySCF's TDDFT output above where coefficients are amplitudes,")
-            print(f"      and contributions = (amplitude)²")
+            # Note about orbital energies
+            print(f"\nNote: Idx = orbital indices (0-indexed), E = orbital energy in eV")
+            print(f"      ΔE = single-particle energy gap (Kohn-Sham), not excitation energy")
         
-        # Save contribution tables to file
+        # Save contribution tables to file (with orbital indices and energies)
         table_file = os.path.join(OUTPUT_DIR, 'absorption_contribution_tables.txt')
         with open(table_file, 'w') as f:
-            f.write("="*70 + "\n")
+            f.write("="*100 + "\n")
             f.write("ABSORPTION ORBITAL PAIR CONTRIBUTIONS (at ground state geometry)\n")
             f.write("These contributions describe the excitation transitions S₀ → Sₙ\n")
-            f.write("="*70 + "\n\n")
+            f.write("="*100 + "\n\n")
             
             for state_id in valid_contrib_states:
                 contributions, total_weight = all_contributions[state_id]
                 excitation_energy = td.e[state_id] * 27.211
                 
-                f.write(f"\n{'='*70}\n")
+                f.write(f"\n{'='*100}\n")
                 f.write(f"ABSORPTION STATE {state_id+1}: {excitation_energy:.4f} eV\n")
-                f.write(f"{'='*70}\n")
-                f.write(f"{'Rank':<6} {'Transition':<30} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}\n")
-                f.write(f"{'-'*70}\n")
+                f.write(f"{'='*100}\n")
+                f.write(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}\n")
+                f.write(f"{'-'*100}\n")
                 
                 cumulative = 0.0
-                for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
+                for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
                     cumulative += weight
-                    f.write(f"{rank:<6} {label:<30} {weight:<12.6f} {weight*100:<11.2f} % {cumulative*100:<11.2f} %\n")
+                    idx_str = f"{occ_idx}→{vir_idx}"
+                    delta_e = (vir_e - occ_e) if (occ_e is not None and vir_e is not None) else 0.0
+                    occ_e_str = f"{occ_e:.3f}" if occ_e is not None else "N/A"
+                    vir_e_str = f"{vir_e:.3f}" if vir_e is not None else "N/A"
+                    delta_e_str = f"{delta_e:.3f}" if (occ_e is not None and vir_e is not None) else "N/A"
+                    f.write(f"{rank:<5} {idx_str:<8} {label:<28} {occ_e_str:<12} {vir_e_str:<12} {delta_e_str:<10} {weight:<10.4f} {weight*100:<7.2f}%\n")
                 
-                f.write(f"{'-'*70}\n")
+                f.write(f"{'-'*100}\n")
                 f.write(f"Total weight analyzed: {total_weight:.6f}\n")
-                f.write(f"Note: Contributions = (TDDFT amplitude)²\n")
-                f.write(f"{'='*70}\n\n")
+                f.write(f"Note: Idx = orbital indices (0-indexed), E = orbital energy in eV\n")
+                f.write(f"      ΔE = single-particle gap (Kohn-Sham), Contributions = (amplitude)²\n")
+                f.write(f"{'='*100}\n\n")
         
         print(f"\n✓ Absorption contribution tables saved to: {table_file}")
         
@@ -1799,48 +1974,59 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
             
             all_emission_contributions[state_id] = (contributions, total_weight)
             
-            # Print contribution table
-            print(f"\n{'='*70}")
+            # Print contribution table with orbital indices and energies
+            print(f"\n{'='*100}")
             print(f"EMISSION STATE {state_id+1}: {emission_energy:.4f} eV")
-            print(f"{'='*70}")
-            print(f"{'Rank':<6} {'Transition':<30} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}")
-            print(f"{'-'*70}")
+            print(f"{'='*100}")
+            print(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}")
+            print(f"{'-'*100}")
             
             cumulative = 0.0
-            for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
+            for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
                 cumulative += weight
-                print(f"{rank:<6} {label:<30} {weight:<12.6f} {weight*100:<11.2f} % {cumulative*100:<11.2f} %")
+                idx_str = f"{occ_idx}→{vir_idx}"
+                delta_e = (vir_e - occ_e) if (occ_e is not None and vir_e is not None) else 0.0
+                occ_e_str = f"{occ_e:.3f}" if occ_e is not None else "N/A"
+                vir_e_str = f"{vir_e:.3f}" if vir_e is not None else "N/A"
+                delta_e_str = f"{delta_e:.3f}" if (occ_e is not None and vir_e is not None) else "N/A"
+                print(f"{rank:<5} {idx_str:<8} {label:<28} {occ_e_str:<12} {vir_e_str:<12} {delta_e_str:<10} {weight:<10.4f} {weight*100:<7.2f}%")
             
-            print(f"{'-'*70}")
+            print(f"{'-'*100}")
             print(f"Total weight analyzed: {total_weight:.6f}")
         
-        # Save emission contribution tables to file
+        # Save emission contribution tables to file (with orbital indices and energies)
         emission_table_file = os.path.join(OUTPUT_DIR, 'emission_contribution_tables.txt')
         with open(emission_table_file, 'w') as f:
-            f.write("="*70 + "\n")
+            f.write("="*100 + "\n")
             f.write("EMISSION ORBITAL PAIR CONTRIBUTIONS (at excited state geometry)\n")
             f.write("These contributions describe the de-excitation transitions Sₙ → S₀\n")
-            f.write("="*70 + "\n\n")
+            f.write("="*100 + "\n\n")
             
             for state_id in valid_emission_states:
                 contributions, total_weight = all_emission_contributions[state_id]
                 emission_energy = td_emission.e[state_id] * 27.211
                 
-                f.write(f"\n{'='*70}\n")
+                f.write(f"\n{'='*100}\n")
                 f.write(f"EMISSION STATE {state_id+1}: {emission_energy:.4f} eV\n")
-                f.write(f"{'='*70}\n")
-                f.write(f"{'Rank':<6} {'Transition':<30} {'Weight':<12} {'Percentage':<12} {'Cumulative':<12}\n")
-                f.write(f"{'-'*70}\n")
+                f.write(f"{'='*100}\n")
+                f.write(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}\n")
+                f.write(f"{'-'*100}\n")
                 
                 cumulative = 0.0
-                for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
+                for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
                     cumulative += weight
-                    f.write(f"{rank:<6} {label:<30} {weight:<12.6f} {weight*100:<11.2f} % {cumulative*100:<11.2f} %\n")
+                    idx_str = f"{occ_idx}→{vir_idx}"
+                    delta_e = (vir_e - occ_e) if (occ_e is not None and vir_e is not None) else 0.0
+                    occ_e_str = f"{occ_e:.3f}" if occ_e is not None else "N/A"
+                    vir_e_str = f"{vir_e:.3f}" if vir_e is not None else "N/A"
+                    delta_e_str = f"{delta_e:.3f}" if (occ_e is not None and vir_e is not None) else "N/A"
+                    f.write(f"{rank:<5} {idx_str:<8} {label:<28} {occ_e_str:<12} {vir_e_str:<12} {delta_e_str:<10} {weight:<10.4f} {weight*100:<7.2f}%\n")
                 
-                f.write(f"{'-'*70}\n")
+                f.write(f"{'-'*100}\n")
                 f.write(f"Total weight analyzed: {total_weight:.6f}\n")
-                f.write(f"Note: Contributions = (TDDFT amplitude)² at excited state geometry\n")
-                f.write(f"{'='*70}\n\n")
+                f.write(f"Note: Idx = orbital indices (0-indexed), E = orbital energy in eV\n")
+                f.write(f"      ΔE = single-particle gap (Kohn-Sham), Contributions = (amplitude)²\n")
+                f.write(f"{'='*100}\n\n")
         
         print(f"\n✓ Emission contribution tables saved to: {emission_table_file}")
     
@@ -2185,14 +2371,14 @@ if td_emission is not None and emission_mol is not None:
         mf_emission_for_cubes = mf_emission_for_cubes.to_cpu()
     
     # Calculate grid parameters for emission geometry
-    emission_grid = calculate_grid_parameters(
+    # Note: calculate_grid_parameters returns (nx, ny, nz, box_info) tuple
+    nx_em, ny_em, nz_em, box_info_em = calculate_grid_parameters(
         emission_mol, 
         use_resolution=USE_GRID_RESOLUTION,
         resolution=GRID_RESOLUTION if USE_GRID_RESOLUTION else None,
         box_margin=BOX_MARGIN,
         grid_spacing=GRID_SPACING if not USE_GRID_RESOLUTION else None
     )
-    nx_em, ny_em, nz_em = emission_grid['nx'], emission_grid['ny'], emission_grid['nz']
     
     # Filter valid states for emission cube files
     valid_emission_cube_states = [s for s in STATES_TO_OUTPUT if s < td_emission.nstates]
@@ -2240,7 +2426,7 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
         print(f"\nState {state_id+1} ({excitation_energy:.4f} eV):")
         
         pair_count = 0
-        for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
+        for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
             if pair_count >= MAX_PAIRS_PER_STATE:
                 break
             
@@ -2249,7 +2435,9 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
                 continue
             
             # Calculate transition density for this pair
-            t_dm_pair = calculate_pair_transition_density(mf, occ_idx, vir_idx)
+            # Pass spin channel for proper UKS handling ('α' -> 'alpha', 'β' -> 'beta')
+            spin_channel = 'beta' if spin == 'β' else 'alpha'
+            t_dm_pair = calculate_pair_transition_density(mf, occ_idx, vir_idx, spin=spin_channel)
             
             # Debug: Check dimensions
             nao = mol.nao_nr()
@@ -2258,13 +2446,14 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
                 print(f"  Skipping {label} - dimension mismatch")
                 continue
             
-            # Generate cube file
+            # Generate cube file with spin label for UKS
             labels, _ = get_orbital_labels(mf)
             occ_label = labels[occ_idx].replace('-', 'm').replace('+', 'p')
             vir_label = labels[vir_idx].replace('-', 'm').replace('+', 'p')
+            spin_suffix = f"_{spin_channel}" if spin else ""
             
             filename = os.path.join(OUTPUT_DIR, 
-                f'transition_pair_state{state_id+1}_{occ_label}_to_{vir_label}.cube')
+                f'transition_pair_state{state_id+1}_{occ_label}_to_{vir_label}{spin_suffix}.cube')
             
             try:
                 cubegen.density(mol, filename, t_dm_pair, nx=nx, ny=ny, nz=nz)
