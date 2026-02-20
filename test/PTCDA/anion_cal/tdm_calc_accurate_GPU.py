@@ -38,7 +38,7 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'H2O.xyz'
+XYZ_FILE = 'emission/charge-1_s1_opt/optimised_structure.xyz'
 BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
@@ -59,7 +59,7 @@ XC_FUNCTIONAL = 'wb97x-d3bj'
 #   'pbe'      - PBE (GGA, faster but less accurate)
 #   'blyp'     - BLYP (GGA)
 
-NUM_EXCITED_STATES = 5
+NUM_EXCITED_STATES = 6
 
 # --- TDDFT Method Selection ---
 USE_TDA = False
@@ -83,9 +83,9 @@ ENABLE_TDDFT = True
 # EMISSION_STATE: Which excited state to optimize for emission (0-indexed, typically 0 for S1)
 # EMISSION_OPT_MAX_STEPS: Max steps for excited state geometry optimization
 ENABLE_EMISSION = True
-EMISSION_STATE = 0
+EMISSION_STATE = 2
 EMISSION_OPT_MAX_STEPS = 200
-EMISSION_OPT_CONV = 'tight'
+EMISSION_OPT_CONV = 'normal'
 
 # --- Geometry Optimization Settings ---
 OPTIMISE_GEOMETRY = False
@@ -107,7 +107,7 @@ VERBOSE_LEVEL = 4
 #   [0, 1, 2] - First three states
 #   [0, 4, 9] - States 1, 5, and 10
 #   range(5) - First five states
-STATES_TO_OUTPUT = [0, 1, 2]
+STATES_TO_OUTPUT = [0, 1, 2, 3, 4, 5]
 
 # --- Cube File Generation Options ---
 GENERATE_TRANSITION_DENSITY = True
@@ -130,13 +130,13 @@ GRID_SPACING = 0.2
 # This is INDEPENDENT of STATES_TO_OUTPUT - you can have different lists
 # Example: Generate cube files for [0,1] but NTO analysis for [0,1,2,3,4]
 ENABLE_NTO_ANALYSIS = True
-NTO_STATES = [0, 1, 2]
+NTO_STATES = [0, 1, 2, 3, 4, 5]
 
 # --- Transition Contribution Analysis ---
 # Analyze which orbital pairs (i→a) contribute to each excited state
 # Shows percentage contribution and generates cube files for dominant pairs
 ENABLE_CONTRIBUTION_ANALYSIS = True
-CONTRIBUTION_STATES = [0, 1, 2]
+CONTRIBUTION_STATES = [0, 1, 2, 3, 4, 5]
 CONTRIBUTION_THRESHOLD = 0.01
 TOP_N_CONTRIBUTIONS = 5
 GENERATE_PAIR_CUBES = True
@@ -150,7 +150,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'H2O_wb97x_d3bj_6_31g__gpu_charge-1'
+OUTPUT_DIR = 'optimised_structure_wb97x_d3bj_6_31g__gpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -404,8 +404,13 @@ if OPTIMISE_GEOMETRY:
         
         print("Optimising geometry with dispersion-corrected forces...")
         mf = build_mf(mol)
+        mf.max_cycle = 200
+        mf.conv_tol = 1e-8
+        mf.conv_tol_grad = 1e-5
+        mf.diis_space = 12
+        mf.level_shift = 0.1
         conv_params = get_opt_conv_params(OPT_CONV_PARAMS)
-        mol = opt_kernel(mf, maxsteps=OPT_MAX_STEPS, **conv_params)
+        mol = opt_kernel(mf, maxsteps=OPT_MAX_STEPS, assert_convergence=False, **conv_params)
         
         # Save optimised structure (intermediate cycles get numbered)
         if OPT_CYCLES > 1:
@@ -860,11 +865,30 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
             gpu_tduks_grad.Gradients._original_dump_flags = original_dump_flags
             gpu_tduks_grad.Gradients.dump_flags = patched_dump_flags
     
-    # Create GPU gradient scanner with relaxed TDDFT convergence for stability
+    # Create GPU gradient scanner with robust SCF settings for excited-state optimization
+    # Key insight: During excited-state geometry optimization, SCF must converge at each
+    # new geometry. Open-shell systems (anions, radicals) are particularly challenging.
     print("Creating GPU-accelerated gradient scanner...")
     
-    # Create a fresh TDDFT object with relaxed convergence for geometry optimization
-    # This helps avoid convergence issues during geometry changes
+    # Configure AGGRESSIVE SCF settings for emission geometry optimization
+    # During S1 optimization, geometries can be far from equilibrium, making SCF very difficult
+    # These settings are more aggressive than ground-state optimization
+    mf.max_cycle = 500          # Allow many more SCF iterations for difficult geometries
+    mf.conv_tol = 1e-7          # Relaxed energy convergence (1e-7 instead of 1e-9)
+    mf.conv_tol_grad = 1e-4     # Relaxed gradient convergence
+    mf.diis_space = 15          # Larger DIIS space for better extrapolation
+    
+    # For open-shell systems, use more aggressive stabilization
+    if actual_spin != 1:
+        mf.level_shift = 0.3    # Higher level shift for open-shell (anions, radicals)
+        mf.damp = 0.5           # Add damping to prevent SCF oscillations
+        print("  Using aggressive SCF stabilization for open-shell system:")
+        print(f"    level_shift = 0.3, damp = 0.5, max_cycle = 500")
+    else:
+        mf.level_shift = 0.1    # Moderate level shift for closed-shell
+    
+    # Create TDDFT object for gradient calculation
+    # Respects USE_TDA setting from run_cal.sh
     if actual_spin == 1:
         if USE_TDA:
             td_for_grad = gpu_tdrks.TDA(mf)
@@ -876,18 +900,47 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
         else:
             td_for_grad = gpu_tduks.TDDFT(mf)
     
+    # Use NUM_EXCITED_STATES for consistency with absorption calculation
+    # This ensures same number of states computed in both absorption and emission
     td_for_grad.nstates = NUM_EXCITED_STATES
-    td_for_grad.conv_tol = 1e-5  # Relaxed TDDFT convergence for gradient (1e-5 provides good balance)
-    td_for_grad.max_cycle = 200  # More iterations allowed
+    td_for_grad.conv_tol = 1e-5  # Relaxed TDDFT convergence for gradient
+    td_for_grad.max_cycle = 200  # More TDDFT iterations allowed
     td_for_grad.verbose = VERBOSE_LEVEL
+    
+    # Explicitly ensure SCF settings are on the _scf object (same as mf, but explicit)
+    # This guarantees the settings propagate when the scanner is created
+    td_for_grad._scf.max_cycle = 500
+    td_for_grad._scf.conv_tol = 1e-7
+    td_for_grad._scf.conv_tol_grad = 1e-4
+    td_for_grad._scf.diis_space = 15
+    if actual_spin != 1:
+        td_for_grad._scf.level_shift = 0.3
+        td_for_grad._scf.damp = 0.5
+    else:
+        td_for_grad._scf.level_shift = 0.1
+    
     # NOTE: Do NOT call td_for_grad.kernel() here - the gradient scanner will 
-    # run TDDFT at each geometry step automatically. Calling it here would be
-    # redundant and waste significant computation time.
+    # run TDDFT at each geometry step automatically.
     
     td_grad = td_for_grad.nuc_grad_method()
-    td_grad.chkfile = None  # Pre-set chkfile
+    td_grad.chkfile = None
     excited_grad = td_grad.as_scanner(state=EMISSION_STATE+1)
-    excited_grad.chkfile = None  # Also set on scanner
+    excited_grad.chkfile = None
+    
+    # CRITICAL: Configure the scanner's internal SCF object to ensure settings propagate
+    # The scanner creates internal objects that may not inherit all settings
+    if hasattr(excited_grad, 'base') and hasattr(excited_grad.base, 'base'):
+        inner_td = excited_grad.base.base
+        if hasattr(inner_td, '_scf'):
+            inner_td._scf.max_cycle = 500
+            inner_td._scf.conv_tol = 1e-7
+            inner_td._scf.conv_tol_grad = 1e-4
+            inner_td._scf.diis_space = 15
+            if actual_spin != 1:
+                inner_td._scf.level_shift = 0.3
+                inner_td._scf.damp = 0.5
+            else:
+                inner_td._scf.level_shift = 0.1
     
     print("✓ GPU gradient scanner created (with relaxed TDDFT convergence)")
     print(f"Optimizing S{EMISSION_STATE+1} geometry on GPU...")
@@ -897,11 +950,20 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
     # Get convergence parameters
     conv_params = get_opt_conv_params(EMISSION_OPT_CONV)
     
+    # For excited-state optimization, use smaller trust radius to prevent large geometry jumps
+    # that can cause SCF convergence failures. This is especially important for:
+    # - Open-shell systems (anions, radicals) where SCF is sensitive to geometry
+    # - Systems with large geometry changes between ground and excited states
+    # Default trust radius is 0.1, we reduce it to 0.05 for stability
+    trust_radius = 0.05 if actual_spin != 1 else 0.08
+    print(f"  Using conservative trust radius: {trust_radius} (for SCF stability)")
+    
     # Optimize excited state geometry using GPU gradients
     # geomeTRIC will call the GPU gradient scanner at each step
     # assert_convergence=False allows optimization to continue even if some TDDFT steps don't fully converge
+    # trust=trust_radius limits maximum step size to prevent jumping into bad SCF regions
     emission_mol = geom_optimize(excited_grad, maxsteps=EMISSION_OPT_MAX_STEPS, 
-                                  assert_convergence=False, **conv_params)
+                                  assert_convergence=False, trust=trust_radius, **conv_params)
     
     # Check optimization convergence and warn if not converged
     # geomeTRIC stores convergence info in the mol object
@@ -943,11 +1005,22 @@ if ENABLE_EMISSION and ENABLE_TDDFT:
         mf_emission_cpu.disp = disp_suffix
     # Use same grid level as ground state mf for consistency
     mf_emission_cpu.grids.level = mf.grids.level
-    mf_emission_cpu.verbose = 0
+    # Apply robust SCF settings (same as used during geometry optimization)
+    mf_emission_cpu.max_cycle = 500
+    mf_emission_cpu.conv_tol = 1e-9
+    mf_emission_cpu.diis_space = 15
+    if actual_spin != 1:
+        mf_emission_cpu.level_shift = 0.3
+        mf_emission_cpu.damp = 0.5
+    else:
+        mf_emission_cpu.level_shift = 0.1
+    mf_emission_cpu.verbose = 4  # Show SCF convergence details
     # Convert to GPU and run
     mf_emission = mf_emission_cpu.to_gpu()
     mf_emission.kernel()
     
+    if not mf_emission.converged:
+        print("  WARNING: Emission SCF did NOT converge! Emission energies may be unreliable.")
     print(f"  Ground state energy at excited geometry: {mf_emission.e_tot:.8f} a.u.")
     
     # Calculate GPU TDDFT at excited state geometry
