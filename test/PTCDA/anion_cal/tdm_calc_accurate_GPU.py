@@ -20,11 +20,151 @@ from pyscf.tools import cubegen, molden
 from gpu4pyscf import dft 
 from gpu4pyscf.tdscf import rks as gpu_tdrks, uks as gpu_tduks
 import numpy as np
+import cupy as cp
 from functools import reduce
 # Note: Dispersion correction is handled via mf.disp='d3bj' (PySCF built-in)
 # External DFTD3 library is NOT required for standard dispersion calculations
 import re
 import os
+
+# ============================================================================
+# GPU-ACCELERATED CUBE FILE GENERATION
+# ============================================================================
+# PySCF's cubegen runs on CPU and is extremely slow for fine grids.
+# These functions use GPU4PySCF's eval_ao/eval_rho for ~100x speedup.
+
+def gpu_density_cube(mol, outfile, dm, nx=80, ny=80, nz=80, margin=3.0, blksize=50000):
+    """
+    GPU-accelerated electron density cube file generation.
+    
+    Uses GPU4PySCF's eval_ao and eval_rho for massive speedup over CPU cubegen.
+    For a 22M grid point calculation: CPU ~days, GPU ~minutes.
+    
+    Args:
+        mol: PySCF molecule object
+        outfile: Output cube file path
+        dm: Density matrix (NumPy array, 2D for RKS or sum of alpha+beta for UKS)
+        nx, ny, nz: Grid points in each direction
+        margin: Box margin in Bohr
+        blksize: Number of grid points to process per GPU batch (tune for VRAM)
+    
+    Returns:
+        rho: 3D density array, integrated_electrons
+    """
+    from gpu4pyscf.dft.numint import eval_ao, eval_rho, _GDFTOpt
+    from pyscf.tools.cubegen import Cube
+    
+    # Create cube grid
+    cc = Cube(mol, nx, ny, nz, margin=margin)
+    coords = cc.get_coords()  # (ngrids, 3) in Bohr
+    ngrids = cc.get_ngrids()
+    
+    print(f"    GPU cubegen: {ngrids:,} grid points ({nx}x{ny}x{nz})")
+    print(f"    Processing in blocks of {blksize:,} points...")
+    
+    # Prepare GPU optimization object - this sorts AOs for GPU efficiency
+    gdftopt = _GDFTOpt.from_mol(mol)
+    
+    # Convert density matrix to CuPy and sort to match GPU AO order
+    # GPU4PySCF internally reorders AOs, so dm must be reordered too
+    dm_gpu = cp.asarray(dm, dtype=cp.float64)
+    dm_sorted = gdftopt.sort_orbitals(dm_gpu, axis=[0, 1])
+    
+    # Process in blocks to manage GPU memory
+    rho = np.empty(ngrids, dtype=np.float64)
+    
+    nblocks = (ngrids + blksize - 1) // blksize
+    progress_every = max(1, nblocks // 20)
+
+    for iblk, ip0 in enumerate(range(0, ngrids, blksize), 1):
+        ip1 = min(ip0 + blksize, ngrids)
+        if iblk == 1 or iblk == nblocks or (iblk % progress_every) == 0:
+            print(f"    GPU cubegen progress: block {iblk}/{nblocks} ({ip0:,}-{ip1:,})", flush=True)
+        coords_block = cp.asarray(coords[ip0:ip1], dtype=cp.float64)
+        
+        # Evaluate AO on GPU using sorted mol
+        # transpose=False gives shape (nao, ngrids) as expected by eval_rho
+        ao_gpu = eval_ao(gdftopt._sorted_mol, coords_block, deriv=0, gdftopt=gdftopt, transpose=False)
+        
+        # Evaluate density: rho = sum_ij dm_ij * ao_i * ao_j
+        rho_gpu = eval_rho(gdftopt._sorted_mol, ao_gpu, dm_sorted, xctype='LDA', hermi=1)
+        
+        # Copy back to CPU
+        rho[ip0:ip1] = cp.asnumpy(rho_gpu)
+        
+        # Free GPU arrays (CuPy memory pool will reuse allocations efficiently)
+        del ao_gpu, rho_gpu, coords_block
+    
+    rho = rho.reshape(cc.nx, cc.ny, cc.nz)
+    
+    # Calculate integrated electrons for verification
+    dx_frac = cc.xs[-1] if len(cc.xs) == 1 else cc.xs[1]
+    dy_frac = cc.ys[-1] if len(cc.ys) == 1 else cc.ys[1]
+    dz_frac = cc.zs[-1] if len(cc.zs) == 1 else cc.zs[1]
+    delta = (cc.box.T * [dx_frac, dy_frac, dz_frac]).T
+    dV = abs(np.linalg.det(delta))
+    integrated_electrons = np.sum(rho) * dV
+    
+    # Write cube file
+    cc.write(rho, outfile, comment='Electron density (GPU-accelerated)')
+    
+    return rho, integrated_electrons
+
+
+def gpu_orbital_cube(mol, outfile, mo_coeff, nx=80, ny=80, nz=80, margin=3.0, blksize=50000):
+    """
+    GPU-accelerated orbital cube file generation.
+    
+    Args:
+        mol: PySCF molecule object
+        outfile: Output cube file path
+        mo_coeff: MO coefficients (1D array for single orbital)
+        nx, ny, nz: Grid points in each direction
+        margin: Box margin in Bohr
+        blksize: Number of grid points per GPU batch
+    
+    Returns:
+        orbital_values: 3D orbital array
+    """
+    from gpu4pyscf.dft.numint import eval_ao, _GDFTOpt
+    from pyscf.tools.cubegen import Cube
+    
+    cc = Cube(mol, nx, ny, nz, margin=margin)
+    coords = cc.get_coords()
+    ngrids = cc.get_ngrids()
+    
+    # Prepare GPU optimization object
+    gdftopt = _GDFTOpt.from_mol(mol)
+    
+    # Sort MO coefficients to match GPU AO order
+    mo_coeff_gpu = cp.asarray(mo_coeff, dtype=cp.float64)
+    mo_coeff_sorted = gdftopt.sort_orbitals(mo_coeff_gpu, axis=[0])
+    
+    orb_values = np.empty(ngrids, dtype=np.float64)
+
+    nblocks = (ngrids + blksize - 1) // blksize
+    progress_every = max(1, nblocks // 20)
+    
+    for iblk, ip0 in enumerate(range(0, ngrids, blksize), 1):
+        ip1 = min(ip0 + blksize, ngrids)
+        if iblk == 1 or iblk == nblocks or (iblk % progress_every) == 0:
+            print(f"    GPU orbital progress: block {iblk}/{nblocks} ({ip0:,}-{ip1:,})", flush=True)
+        coords_block = cp.asarray(coords[ip0:ip1], dtype=cp.float64)
+        
+        # AO values using sorted mol, transpose=True gives (ngrids, nao)
+        ao_gpu = eval_ao(gdftopt._sorted_mol, coords_block, deriv=0, gdftopt=gdftopt, transpose=True)
+        
+        # MO = sum_i c_i * ao_i  (ao is ngrids x nao, mo_coeff is nao)
+        mo_gpu = cp.dot(ao_gpu, mo_coeff_sorted)
+        
+        orb_values[ip0:ip1] = cp.asnumpy(mo_gpu)
+        
+        del ao_gpu, mo_gpu, coords_block
+    
+    orb_values = orb_values.reshape(cc.nx, cc.ny, cc.nz)
+    cc.write(orb_values, outfile, comment='Molecular orbital (GPU-accelerated)')
+    
+    return orb_values
 
 # ============================================================================
 # CONFIGURATION SECTION - MODIFY THESE SETTINGS
@@ -38,11 +178,11 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'emission/charge-1_s1_opt/optimised_structure.xyz'
-BASIS_SET = '6-31g*'
+XYZ_FILE = 'opt/charge0/wb97x_d3bj/optimised_structure.xyz'
+BASIS_SET = 'def2-TZVPPD'
 
 # --- Charge and Spin Settings ---
-CHARGE = -1
+CHARGE = 0
 SPIN = None
 # Note: Spin is auto-calculated from electron count if set to None
 # For charged systems: cation (+1) typically has spin=2 (doublet), anion (-1) has spin=2 (doublet)
@@ -82,13 +222,13 @@ ENABLE_TDDFT = True
 # ENABLE_EMISSION: Calculate emission energy (requires ENABLE_TDDFT=True)
 # EMISSION_STATE: Which excited state to optimize for emission (0-indexed, typically 0 for S1)
 # EMISSION_OPT_MAX_STEPS: Max steps for excited state geometry optimization
-ENABLE_EMISSION = True
+ENABLE_EMISSION = False
 EMISSION_STATE = 2
 EMISSION_OPT_MAX_STEPS = 200
 EMISSION_OPT_CONV = 'normal'
 
 # --- Geometry Optimization Settings ---
-OPTIMISE_GEOMETRY = False
+OPTIMISE_GEOMETRY = True
 OPT_CYCLES = 5
 OPT_MAX_STEPS = 150
 OPT_CONV_PARAMS = 'tight'
@@ -121,8 +261,8 @@ USE_GRID_RESOLUTION = False
 GRID_RESOLUTION = [80, 80, 80]
 
 # Option 2: Use box dimensions (in Angstrom) - only used if USE_GRID_RESOLUTION = False
-BOX_MARGIN = 4.0
-GRID_SPACING = 0.2
+BOX_MARGIN = 15
+GRID_SPACING = 0.15
 
 # --- NTO Analysis ---
 # NTO_STATES: Which states to perform NTO ANALYSIS for (0-indexed)
@@ -150,7 +290,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'optimised_structure_wb97x_d3bj_6_31g__gpu_charge-1'
+OUTPUT_DIR = 'optimised_structure_wb97x_d3bj_def2_tzvppd_gpu_charge0'
 
 # ============================================================================
 # END OF CONFIGURATION
@@ -524,6 +664,17 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
     print("\n" + "="*70)
     print("GROUND STATE DENSITY AND POTENTIAL")
     print("="*70)
+
+    coords_ang = mol.atom_coords() * 0.529177
+    mol_size_ang = coords_ang.max(axis=0) - coords_ang.min(axis=0)
+    margin_bohr = BOX_MARGIN / 0.529177
+    if USE_GRID_RESOLUTION:
+        nx_g, ny_g, nz_g = GRID_RESOLUTION
+    else:
+        box_size_ang = mol_size_ang + 2 * BOX_MARGIN
+        nx_g = int(np.ceil(box_size_ang[0] / GRID_SPACING))
+        ny_g = int(np.ceil(box_size_ang[1] / GRID_SPACING))
+        nz_g = int(np.ceil(box_size_ang[2] / GRID_SPACING))
     
     # Calculate ground state density matrix
     dm = mf.make_rdm1()
@@ -532,6 +683,9 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
     if hasattr(dm, 'get'):
         dm = dm.get()
     
+    # Overlap matrix for correct electron counting in AO basis
+    s1e = mol.intor('int1e_ovlp')
+
     # Handle UKS (sum alpha and beta densities)
     # GPU4PySCF UKS returns shape (2, nao, nao) or tuple of (dm_alpha, dm_beta)
     # CPU PySCF UKS returns tuple of (dm_alpha, dm_beta)
@@ -543,8 +697,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         
         dm_total = dm_alpha + dm_beta
         
-        n_alpha = np.trace(dm_alpha).item()  # .item() converts to Python scalar
-        n_beta = np.trace(dm_beta).item()
+        n_alpha = np.einsum('ij,ji->', dm_alpha, s1e).item()
+        n_beta = np.einsum('ij,ji->', dm_beta, s1e).item()
         
         print("System type: UKS (open-shell)")
         print(f"  Alpha electrons: {n_alpha:.2f}")
@@ -557,8 +711,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         
         dm_total = dm_alpha + dm_beta
         
-        n_alpha = np.trace(dm_alpha).item()
-        n_beta = np.trace(dm_beta).item()
+        n_alpha = np.einsum('ij,ji->', dm_alpha, s1e).item()
+        n_beta = np.einsum('ij,ji->', dm_beta, s1e).item()
         
         print("System type: UKS (open-shell)")
         print(f"  Alpha electrons: {n_alpha:.2f}")
@@ -569,8 +723,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         print("System type: RKS (closed-shell)")
     
     # Calculate total electrons
-    total_electrons = np.trace(dm_total).item()  # .item() for scalar
-    print(f"Total electrons: {total_electrons:.2f}")
+    total_electrons = np.einsum('ij,ji->', dm_total, s1e).item()
+    print(f"Total electrons (Tr[DM*S]): {total_electrons:.6f}")
     print(f"Molecular charge: {CHARGE}")
     print(f"Expected electrons: {mol.nelectron}")
     
@@ -585,110 +739,107 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
     # Generate ground state charge density cube file
     if GENERATE_GROUND_STATE_DENSITY:
         density_file = os.path.join(OUTPUT_DIR, 'ground_state_density.cube')
-        print(f"\nGenerating ground state charge density...")
-        try:
-            cubegen.density(mol, density_file, dm_total)
-            print(f"  ✓ Ground state density: {density_file}")
-            print(f"    Use this to visualize total electron distribution")
-        except Exception as e:
-            print(f"  ✗ Failed to generate density cube: {str(e)}")
+        print(f"\nGenerating ground state charge density (GPU-accelerated)...")
+        rho, integrated_e = gpu_density_cube(mol, density_file, dm_total, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Ground state density: {density_file}")
+        print(f"    Integrated electrons: {integrated_e:.4f} (expected: {mol.nelectron})")
+        print(f"    Use this to visualize total electron distribution")
     
     # Generate electrostatic potential cube file
     if GENERATE_ELECTROSTATIC_POTENTIAL:
         esp_file = os.path.join(OUTPUT_DIR, 'electrostatic_potential.cube')
         print(f"\nGenerating electrostatic potential (ESP)...")
-        try:
-            # ESP = Nuclear potential + Electronic potential
-            # cubegen.mep calculates the molecular electrostatic potential
-            from pyscf.tools import cubegen
-            cubegen.mep(mol, esp_file, dm_total)
-            print(f"  ✓ Electrostatic potential: {esp_file}")
-            print(f"    Use this to identify:")
-            print(f"      - Nucleophilic sites (negative ESP, red)")
-            print(f"      - Electrophilic sites (positive ESP, blue)")
-            print(f"      - Reaction sites and molecular recognition")
-        except Exception as e:
-            print(f"  ✗ Failed to generate ESP cube: {str(e)}")
+        print("  NOTE: ESP generation uses PySCF cubegen.mep (CPU-only) and can be extremely slow on fine grids.")
+        esp_ngrids = int(nx_g) * int(ny_g) * int(nz_g)
+        print(f"  ESP grid points: {esp_ngrids:,} ({nx_g}x{ny_g}x{nz_g})")
+        if esp_ngrids > 2000000:
+            print("  WARNING: This ESP grid is very large. If it feels stuck, set GENERATE_ELECTROSTATIC_POTENTIAL=False or increase GRID_SPACING for an ESP-only run.")
+        # ESP = Nuclear potential + Electronic potential
+        # cubegen.mep calculates the molecular electrostatic potential
+        from pyscf.tools import cubegen
+        cubegen.mep(mol, esp_file, dm_total, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Electrostatic potential: {esp_file}")
+        print(f"    Use this to identify:")
+        print(f"      - Nucleophilic sites (negative ESP, red)")
+        print(f"      - Electrophilic sites (positive ESP, blue)")
+        print(f"      - Reaction sites and molecular recognition")
     
     # Generate deformation density (SCF density - Promolecule density)
     if GENERATE_DEFORMATION_DENSITY:
         print(f"\nGenerating deformation density...")
         print(f"  Deformation density = SCF density - Promolecule density")
         print(f"  Shows charge redistribution due to chemical bonding")
-        
-        try:
-            # Get promolecule density (superposition of atomic densities)
-            # This is the non-interacting atomic density (no electron-electron interaction)
-            if actual_spin == 1:
-                # RKS: use scf.hf.init_guess_by_atom for closed-shell systems
-                from pyscf import scf as pyscf_scf
-                dm_promol = pyscf_scf.hf.init_guess_by_atom(mol)
+
+        # Get promolecule density (superposition of atomic densities)
+        # This is the non-interacting atomic density (no electron-electron interaction)
+        if actual_spin == 1:
+            # RKS: use scf.hf.init_guess_by_atom for closed-shell systems
+            from pyscf import scf as pyscf_scf
+            dm_promol = pyscf_scf.hf.init_guess_by_atom(mol)
+            dm_promol = np.asarray(dm_promol, dtype=np.float64)
+
+            print(f"  System: RKS (closed-shell)")
+            print(f"  Promolecule electrons: {np.trace(dm_promol).item():.2f}")
+        else:
+            # UKS: use scf.uhf.init_guess_by_atom
+            from pyscf import scf as pyscf_scf
+            dm_promol = pyscf_scf.uhf.init_guess_by_atom(mol)
+
+            # Handle both tuple and array formats
+            if isinstance(dm_promol, tuple):
+                dm_promol_alpha, dm_promol_beta = dm_promol
+                dm_promol_alpha = np.asarray(dm_promol_alpha, dtype=np.float64)
+                dm_promol_beta = np.asarray(dm_promol_beta, dtype=np.float64)
+                dm_promol_total = dm_promol_alpha + dm_promol_beta
+            elif dm_promol.ndim == 3 and dm_promol.shape[0] == 2:
                 dm_promol = np.asarray(dm_promol, dtype=np.float64)
-                
-                print(f"  System: RKS (closed-shell)")
-                print(f"  Promolecule electrons: {np.trace(dm_promol).item():.2f}")
+                dm_promol_alpha = dm_promol[0]
+                dm_promol_beta = dm_promol[1]
+                dm_promol_total = dm_promol_alpha + dm_promol_beta
             else:
-                # UKS: use scf.uhf.init_guess_by_atom
-                from pyscf import scf as pyscf_scf
-                dm_promol = pyscf_scf.uhf.init_guess_by_atom(mol)
-                
-                # Handle both tuple and array formats
-                if isinstance(dm_promol, tuple):
-                    dm_promol_alpha, dm_promol_beta = dm_promol
-                    dm_promol_alpha = np.asarray(dm_promol_alpha, dtype=np.float64)
-                    dm_promol_beta = np.asarray(dm_promol_beta, dtype=np.float64)
-                    dm_promol_total = dm_promol_alpha + dm_promol_beta
-                elif dm_promol.ndim == 3 and dm_promol.shape[0] == 2:
-                    dm_promol = np.asarray(dm_promol, dtype=np.float64)
-                    dm_promol_alpha = dm_promol[0]
-                    dm_promol_beta = dm_promol[1]
-                    dm_promol_total = dm_promol_alpha + dm_promol_beta
-                else:
-                    raise ValueError(f"Unexpected promolecule density format: {type(dm_promol)}, shape: {dm_promol.shape if hasattr(dm_promol, 'shape') else 'N/A'}")
-                
-                print(f"  System: UKS (open-shell)")
-                print(f"  Promolecule alpha electrons: {np.trace(dm_promol_alpha).item():.2f}")
-                print(f"  Promolecule beta electrons: {np.trace(dm_promol_beta).item():.2f}")
-                print(f"  Promolecule total electrons: {np.trace(dm_promol_total).item():.2f}")
-                
-                dm_promol = dm_promol_total
-            
-            # Calculate deformation density
-            deformation_density = dm_total - dm_promol
-            
-            # Verify shapes match
-            if deformation_density.shape != (nao, nao):
-                raise ValueError(f"Deformation density shape {deformation_density.shape} doesn't match AO basis {nao}x{nao}")
-            
-            # Calculate deformation integral (should be close to 0)
-            deformation_integral = np.trace(deformation_density).item()
-            max_deformation = np.max(np.abs(deformation_density))
-            
-            print(f"  Deformation integral: {deformation_integral:.6f} (should be ~0)")
-            print(f"  Max |deformation|: {max_deformation:.6f}")
-            
-            # Save cube files
-            scf_density_file = os.path.join(OUTPUT_DIR, 'scf_density.cube')
-            promol_density_file = os.path.join(OUTPUT_DIR, 'promolecule_density.cube')
-            deform_density_file = os.path.join(OUTPUT_DIR, 'deformation_density.cube')
-            
-            cubegen.density(mol, scf_density_file, dm_total)
-            print(f"  ✓ SCF density: {scf_density_file}")
-            
-            cubegen.density(mol, promol_density_file, dm_promol)
-            print(f"  ✓ Promolecule density: {promol_density_file}")
-            
-            cubegen.density(mol, deform_density_file, deformation_density)
-            print(f"  ✓ Deformation density: {deform_density_file}")
-            
-            print(f"  Interpretation:")
-            print(f"    - Positive regions (red): electron accumulation (bonding)")
-            print(f"    - Negative regions (blue): electron depletion (atomic cores)")
-            
-        except Exception as e:
-            print(f"  ✗ Failed to generate deformation density: {str(e)}")
-            import traceback
-            traceback.print_exc()
+                raise ValueError(f"Unexpected promolecule density format: {type(dm_promol)}, shape: {dm_promol.shape if hasattr(dm_promol, 'shape') else 'N/A'}")
+
+            print(f"  System: UKS (open-shell)")
+            print(f"  Promolecule alpha electrons: {np.trace(dm_promol_alpha).item():.2f}")
+            print(f"  Promolecule beta electrons: {np.trace(dm_promol_beta).item():.2f}")
+            print(f"  Promolecule total electrons: {np.trace(dm_promol_total).item():.2f}")
+
+            dm_promol = dm_promol_total
+
+        # Calculate deformation density
+        deformation_density = dm_total - dm_promol
+
+        # Verify shapes match
+        if deformation_density.shape != (nao, nao):
+            raise ValueError(f"Deformation density shape {deformation_density.shape} doesn't match AO basis {nao}x{nao}")
+
+        # Calculate deformation integral (should be close to 0)
+        deformation_integral = np.trace(deformation_density).item()
+        max_deformation = np.max(np.abs(deformation_density))
+
+        print(f"  Deformation integral: {deformation_integral:.6f} (should be ~0)")
+        print(f"  Max |deformation|: {max_deformation:.6f}")
+
+        # Save cube files (GPU-accelerated)
+        scf_density_file = os.path.join(OUTPUT_DIR, 'scf_density.cube')
+        promol_density_file = os.path.join(OUTPUT_DIR, 'promolecule_density.cube')
+        deform_density_file = os.path.join(OUTPUT_DIR, 'deformation_density.cube')
+
+        print(f"  Generating SCF density cube (GPU)...")
+        _, scf_int_e = gpu_density_cube(mol, scf_density_file, dm_total, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ SCF density: {scf_density_file} (integrated: {scf_int_e:.4f})")
+
+        print(f"  Generating promolecule density cube (GPU)...")
+        _, promol_int_e = gpu_density_cube(mol, promol_density_file, dm_promol, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Promolecule density: {promol_density_file} (integrated: {promol_int_e:.4f})")
+
+        print(f"  Generating deformation density cube (GPU)...")
+        _, deform_int_e = gpu_density_cube(mol, deform_density_file, deformation_density, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Deformation density: {deform_density_file} (integrated: {deform_int_e:.4f}, should be ~0)")
+
+        print(f"  Interpretation:")
+        print(f"    - Positive regions (red): electron accumulation (bonding)")
+        print(f"    - Negative regions (blue): electron depletion (atomic cores)")
     
     print("="*70)
 
@@ -1486,44 +1637,56 @@ def calculate_excited_state_density(td, state_id):
         mo_occ_a = np.asarray(mo_occ_a)
         mo_occ_b = np.asarray(mo_occ_b)
         
-        # Calculate alpha spin contribution
-        nocc_a = Xa.shape[0]
-        nmo_a = mo_coeff_a.shape[1]
-        
-        # Density matrix changes in MO basis for alpha
+        dm0 = mf.make_rdm1()
+        if hasattr(dm0, 'get'):
+            dm0 = dm0.get()
+        if isinstance(dm0, tuple):
+            dm0_a, dm0_b = dm0
+        else:
+            dm0 = np.asarray(dm0)
+            if dm0.ndim == 3 and dm0.shape[0] == 2:
+                dm0_a, dm0_b = dm0[0], dm0[1]
+            else:
+                raise ValueError(f"Unexpected UKS ground-state density matrix format: {type(dm0)}, shape={getattr(dm0,'shape',None)}")
+
+        occ_a = mo_occ_a > 0
+        vir_a = mo_occ_a == 0
+        orbo_a = mo_coeff_a[:, occ_a]
+        orbv_a = mo_coeff_a[:, vir_a]
+        if Xa.shape != (orbo_a.shape[1], orbv_a.shape[1]):
+            raise ValueError(f"Xa shape {Xa.shape} does not match (nocc,nvir)=({orbo_a.shape[1]},{orbv_a.shape[1]})")
+
         dm_oo_a = -np.einsum('ia,ka->ik', Xa.conj(), Xa)
         dm_vv_a = np.einsum('ia,ic->ac', Xa, Xa.conj())
         if not is_tda:
             dm_oo_a -= np.einsum('ia,ka->ik', Ya.conj(), Ya)
             dm_vv_a += np.einsum('ia,ic->ac', Ya, Ya.conj())
-        
-        # Ground state density in MO basis (alpha)
-        dm_mo_a = np.diag(mo_occ_a)
-        dm_mo_a[:nocc_a, :nocc_a] += dm_oo_a
-        dm_mo_a[nocc_a:, nocc_a:] += dm_vv_a
-        
-        # Transform to AO basis
-        dm_ao_a = np.einsum('pi,ij,qj->pq', mo_coeff_a, dm_mo_a, mo_coeff_a.conj())
-        
-        # Calculate beta spin contribution
-        nocc_b = Xb.shape[0]
-        nmo_b = mo_coeff_b.shape[1]
-        
+
+        delta_ao_a = (
+            np.einsum('pi,ij,qj->pq', orbo_a, dm_oo_a, orbo_a.conj())
+            + np.einsum('pa,ab,qb->pq', orbv_a, dm_vv_a, orbv_a.conj())
+        )
+        dm_ao_a = np.asarray(dm0_a, dtype=np.float64) + np.asarray(delta_ao_a.real, dtype=np.float64)
+
+        occ_b = mo_occ_b > 0
+        vir_b = mo_occ_b == 0
+        orbo_b = mo_coeff_b[:, occ_b]
+        orbv_b = mo_coeff_b[:, vir_b]
+        if Xb.shape != (orbo_b.shape[1], orbv_b.shape[1]):
+            raise ValueError(f"Xb shape {Xb.shape} does not match (nocc,nvir)=({orbo_b.shape[1]},{orbv_b.shape[1]})")
+
         dm_oo_b = -np.einsum('ia,ka->ik', Xb.conj(), Xb)
         dm_vv_b = np.einsum('ia,ic->ac', Xb, Xb.conj())
         if not is_tda:
             dm_oo_b -= np.einsum('ia,ka->ik', Yb.conj(), Yb)
             dm_vv_b += np.einsum('ia,ic->ac', Yb, Yb.conj())
-        
-        # Ground state density in MO basis (beta)
-        dm_mo_b = np.diag(mo_occ_b)
-        dm_mo_b[:nocc_b, :nocc_b] += dm_oo_b
-        dm_mo_b[nocc_b:, nocc_b:] += dm_vv_b
-        
-        # Transform to AO basis
-        dm_ao_b = np.einsum('pi,ij,qj->pq', mo_coeff_b, dm_mo_b, mo_coeff_b.conj())
-        
-        # Total excited state density = alpha + beta
+
+        delta_ao_b = (
+            np.einsum('pi,ij,qj->pq', orbo_b, dm_oo_b, orbo_b.conj())
+            + np.einsum('pa,ab,qb->pq', orbv_b, dm_vv_b, orbv_b.conj())
+        )
+        dm_ao_b = np.asarray(dm0_b, dtype=np.float64) + np.asarray(delta_ao_b.real, dtype=np.float64)
+
         dm_excited = dm_ao_a + dm_ao_b
         
     else:
@@ -1561,7 +1724,7 @@ def calculate_excited_state_density(td, state_id):
         # Transform to AO basis
         dm_excited = np.einsum('pi,ij,qj->pq', mo_coeff, dm, mo_coeff.conj())
     
-    return dm_excited
+    return np.asarray(dm_excited.real, dtype=np.float64)
 
 # ============================================================================
 # 5A. TRANSITION CONTRIBUTION ANALYSIS FUNCTIONS
@@ -2174,7 +2337,8 @@ print("="*70)
 
 if USE_GRID_RESOLUTION:
     nx, ny, nz, box_info = calculate_grid_parameters(
-        mol, use_resolution=True, resolution=GRID_RESOLUTION
+        mol, use_resolution=True, resolution=GRID_RESOLUTION,
+        box_margin=BOX_MARGIN
     )
     print(f"Using fixed grid resolution: {nx} × {ny} × {nz}")
     print(f"Total grid points: {box_info['total_points']:,}")
@@ -2190,6 +2354,8 @@ else:
     print(f"Calculated grid resolution: {nx} × {ny} × {nz}")
     print(f"Total grid points: {box_info['total_points']:,}")
     print(f"Box size: {box_info['box_size']} Å")
+
+margin_bohr = BOX_MARGIN / 0.529177
 
 print("="*70)
 
@@ -2228,25 +2394,25 @@ if GENERATE_HOMO_LUMO:
     print(f"LUMO energy: {mo_energy[lumo_idx]*27.211:.3f} eV")
     print(f"HOMO-LUMO gap: {(mo_energy[lumo_idx] - mo_energy[homo_idx])*27.211:.3f} eV")
     
-    # Generate HOMO cube file
+    # Generate HOMO cube file (GPU-accelerated)
     homo_file = os.path.join(OUTPUT_DIR, 'HOMO.cube')
-    cubegen.orbital(mol, homo_file, mo_coeff[:, homo_idx], nx=nx, ny=ny, nz=nz)
+    gpu_orbital_cube(mol, homo_file, mo_coeff[:, homo_idx], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
     print(f"\n  ✓ HOMO orbital: {homo_file}")
     
-    # Generate LUMO cube file
+    # Generate LUMO cube file (GPU-accelerated)
     lumo_file = os.path.join(OUTPUT_DIR, 'LUMO.cube')
-    cubegen.orbital(mol, lumo_file, mo_coeff[:, lumo_idx], nx=nx, ny=ny, nz=nz)
+    gpu_orbital_cube(mol, lumo_file, mo_coeff[:, lumo_idx], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
     print(f"  ✓ LUMO orbital: {lumo_file}")
     
-    # Generate HOMO-1 and LUMO+1 for additional verification
+    # Generate HOMO-1 and LUMO+1 for additional verification (GPU-accelerated)
     if homo_idx > 0:
         homo1_file = os.path.join(OUTPUT_DIR, 'HOMO-1.cube')
-        cubegen.orbital(mol, homo1_file, mo_coeff[:, homo_idx-1], nx=nx, ny=ny, nz=nz)
+        gpu_orbital_cube(mol, homo1_file, mo_coeff[:, homo_idx-1], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
         print(f"  ✓ HOMO-1 orbital: {homo1_file}")
     
     if lumo_idx < len(mo_occ) - 1:
         lumo1_file = os.path.join(OUTPUT_DIR, 'LUMO+1.cube')
-        cubegen.orbital(mol, lumo1_file, mo_coeff[:, lumo_idx+1], nx=nx, ny=ny, nz=nz)
+        gpu_orbital_cube(mol, lumo1_file, mo_coeff[:, lumo_idx+1], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
         print(f"  ✓ LUMO+1 orbital: {lumo1_file}")
     
     print("\nVerification tip:")
@@ -2269,9 +2435,9 @@ if GENERATE_HOMO_LUMO:
     # In AO basis: T_μν = C_μ^HOMO * C_ν^LUMO + C_μ^LUMO * C_ν^HOMO
     t_homo_lumo = np.outer(homo_mo, lumo_mo) + np.outer(lumo_mo, homo_mo)
     
-    # Generate cube file for HOMO→LUMO transition density
+    # Generate cube file for HOMO→LUMO transition density (GPU-accelerated)
     homo_lumo_file = os.path.join(OUTPUT_DIR, 'transition_HOMO_LUMO_analytical.cube')
-    cubegen.density(mol, homo_lumo_file, t_homo_lumo, nx=nx, ny=ny, nz=nz)
+    gpu_density_cube(mol, homo_lumo_file, t_homo_lumo, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
     print(f"  ✓ Analytical HOMO→LUMO transition: {homo_lumo_file}")
     
     print("\nTo verify S1 is a HOMO→LUMO transition, compare:")
@@ -2305,18 +2471,18 @@ else:
     for state_id in valid_states:
         print(f"\nState {state_id+1}: {td.e[state_id]*27.211:.3f} eV")
         
-        # 1. Transition density matrix
+        # 1. Transition density matrix (GPU-accelerated)
         if GENERATE_TRANSITION_DENSITY:
             dm_trans = calculate_transition_density_matrix(td, state_id)
             filename_trans = os.path.join(OUTPUT_DIR, f'transition_density_state{state_id+1}.cube')
-            cubegen.density(mol, filename_trans, dm_trans, nx=nx, ny=ny, nz=nz)
+            gpu_density_cube(mol, filename_trans, dm_trans, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
             print(f"  ✓ Transition density: {filename_trans}")
         
-        # 2. Excited state density
+        # 2. Excited state density (GPU-accelerated)
         if GENERATE_EXCITED_DENSITY:
             dm_excited = calculate_excited_state_density(td, state_id)
             filename_excited = os.path.join(OUTPUT_DIR, f'excited_state_density_state{state_id+1}.cube')
-            cubegen.density(mol, filename_excited, dm_excited, nx=nx, ny=ny, nz=nz)
+            gpu_density_cube(mol, filename_excited, dm_excited, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
             print(f"  ✓ Excited state density: {filename_excited}")
         
         # 3. Density difference
@@ -2332,10 +2498,14 @@ else:
             # For UKS, dm_ground is a tuple (alpha, beta), sum them
             if isinstance(dm_ground, tuple):
                 dm_ground = dm_ground[0] + dm_ground[1]
+            else:
+                dm_ground = np.asarray(dm_ground)
+                if dm_ground.ndim == 3 and dm_ground.shape[0] == 2:
+                    dm_ground = dm_ground[0] + dm_ground[1]
             
             dm_diff = dm_excited - dm_ground
             filename_diff = os.path.join(OUTPUT_DIR, f'density_difference_state{state_id+1}.cube')
-            cubegen.density(mol, filename_diff, dm_diff, nx=nx, ny=ny, nz=nz)
+            gpu_density_cube(mol, filename_diff, dm_diff, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
             print(f"  ✓ Density difference: {filename_diff}")
         
         # Quantitative verification for first state
@@ -2452,6 +2622,8 @@ if td_emission is not None and emission_mol is not None:
         box_margin=BOX_MARGIN,
         grid_spacing=GRID_SPACING if not USE_GRID_RESOLUTION else None
     )
+
+    margin_em_bohr = BOX_MARGIN / 0.529177
     
     # Filter valid states for emission cube files
     valid_emission_cube_states = [s for s in STATES_TO_OUTPUT if s < td_emission.nstates]
@@ -2466,11 +2638,11 @@ if td_emission is not None and emission_mol is not None:
         
         print(f"\nEmission State {state_id+1}: {emission_energy_ev:.3f} eV {validity}")
         
-        # 1. Emission Transition density matrix
+        # 1. Emission Transition density matrix (GPU-accelerated)
         if GENERATE_TRANSITION_DENSITY:
             dm_trans_em = calculate_transition_density_matrix(td_emission, state_id)
             filename_trans_em = os.path.join(OUTPUT_DIR, f'emission_transition_density_state{state_id+1}.cube')
-            cubegen.density(emission_mol, filename_trans_em, dm_trans_em, nx=nx_em, ny=ny_em, nz=nz_em)
+            gpu_density_cube(emission_mol, filename_trans_em, dm_trans_em, nx=nx_em, ny=ny_em, nz=nz_em, margin=margin_em_bohr)
             print(f"  ✓ Emission transition density: {filename_trans_em}")
     
     # Save optimized excited state geometry
@@ -2527,14 +2699,10 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
             
             filename = os.path.join(OUTPUT_DIR, 
                 f'transition_pair_state{state_id+1}_{occ_label}_to_{vir_label}{spin_suffix}.cube')
-            
-            try:
-                cubegen.density(mol, filename, t_dm_pair, nx=nx, ny=ny, nz=nz)
-                print(f"  ✓ Rank {rank}: {label} ({weight*100:.2f}%) → {filename}")
-                pair_count += 1
-            except (AssertionError, ValueError) as e:
-                print(f"  ✗ Failed to generate cube for {label}: {str(e)}")
-                continue
+
+            gpu_density_cube(mol, filename, t_dm_pair, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
+            print(f"  ✓ Rank {rank}: {label} ({weight*100:.2f}%) → {filename}")
+            pair_count += 1
     
     print("="*70)
 

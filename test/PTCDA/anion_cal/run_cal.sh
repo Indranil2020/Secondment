@@ -32,9 +32,9 @@ ENABLE_TDDFT=True               # Run TDDFT excited state calculation
 # ============================================================================
 USE_XYZ=True                    # True: use XYZ file, False: use built-in H2O test
 # XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (relative or absolute)
-# XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"
+XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"     # PTCDA Neutral optimised structure
 # XYZ_FILE="emission/optimised_structure_wb97x_d3bj_6_31g__gpu_charge0/optimised_structure.xyz"
-XYZ_FILE="emission/charge-1_s1_opt/optimised_structure.xyz"
+# XYZ_FILE="emission/charge-1_s1_opt/optimised_structure.xyz"     # PTCDA Anion optimised structure
 # XYZ_FILE="/home/indranil/Documents/Secondment/test/PTCDA/anion_cal/opt/charge-1/wb97x_d3bj/ptcda_anion_dimer_T_from_molecules_ini.xyz"
 # XYZ_FILE="azulene.xyz"
 # XYZ_FILE="azulene_-1_opt.xyz"
@@ -45,11 +45,11 @@ XYZ_FILE="emission/charge-1_s1_opt/optimised_structure.xyz"
 # --- Charge and Spin ---
 # CHARGE="-2"                    # Molecular charge: 0, +1, -1, or batch "0 1 -1"
 # SPIN=3                          # Spin multiplicity: 3=triplet for dianion (2 unpaired e-)
-CHARGE="-1"
+CHARGE="0"
 SPIN=None
 
 # --- Basis Set ---
-BASIS_SET="6-31g*"              # Options: 6-31g, 6-31g*, 6-311g**, def2-SVP, def2-TZVP
+BASIS_SET="def2-TZVPPD"              # Options: 6-31g, 6-31g*, 6-311g**, def2-SVP, def2-TZVP, def2-SVPD, def2-QZVPPD 
 
 # --- DFT Functional ---
 # Supported dispersion: -d3bj, -d3zero, -d3bjm, -d3zerom, -d3op, -d4
@@ -59,7 +59,7 @@ XC_FUNCTIONAL="wb97x-d3bj"      # Examples: b3lyp, pbe0, cam-b3lyp, wb97x-d3bj
 # ============================================================================
 #                    SECTION 4: GEOMETRY OPTIMIZATION
 # ============================================================================
-OPTIMISE_GEOMETRY=False           # True: optimize geometry, False: use input as-is
+OPTIMISE_GEOMETRY=True           # True: optimize geometry, False: use input as-is
 OPT_CYCLES=5                    # Number of optimization cycles (output N → input N+1)
 OPT_MAX_STEPS=150               # Max steps per optimization cycle
 OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose"
@@ -76,7 +76,7 @@ USE_TDA=False                   # True: TDA (faster), False: Full TDDFT (more ac
 # --- Emission Calculation ---
 # Emission = fluorescence from excited state minimum geometry
 # Requires excited state geometry optimization + TDDFT at that geometry
-ENABLE_EMISSION=True           # Calculate emission energy (requires ENABLE_TDDFT=True)
+ENABLE_EMISSION=False           # Calculate emission energy (requires ENABLE_TDDFT=True)
 EMISSION_STATE=2                # Which state to optimize (0=S1, 1=S2, etc.)
 EMISSION_OPT_MAX_STEPS=200      # Max steps for excited state optimization
 EMISSION_OPT_CONV="normal"       # Convergence: "tight", "normal", "loose"
@@ -116,8 +116,8 @@ USE_GRID_RESOLUTION=False       # True: fixed resolution, False: use spacing
 GRID_RESOLUTION_X=80            # Grid points in X (if USE_GRID_RESOLUTION=True)
 GRID_RESOLUTION_Y=80            # Grid points in Y
 GRID_RESOLUTION_Z=80            # Grid points in Z
-BOX_MARGIN=4.0                  # Margin around molecule (Angstrom)
-GRID_SPACING=0.2                # Grid spacing (Angstrom)
+BOX_MARGIN=15                  # Margin around molecule (Angstrom)
+GRID_SPACING=0.15                # Grid spacing (Angstrom) - fine grid for accurate integration
 
 # ============================================================================
 #                    SECTION 8: EXECUTION SETTINGS
@@ -401,21 +401,21 @@ main() {
     if [ "$RUN_IN_BACKGROUND" = True ]; then
         # Run in background
         if [ "$VERBOSE" = True ]; then
-            { time python3 "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 ; } 2> "${TIME_FILE_PATH}" &
+            { time python3 -u "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 ; } 2> "${TIME_FILE_PATH}" &
             PID=$!
             echo -e "${GREEN}✓ Calculation started in background (PID: ${PID})${NC}"
             echo -e "${BLUE}Monitor with: tail -f ${LOG_FILE_PATH}${NC}"
         else
-            { time python3 "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 ; } 2> "${TIME_FILE_PATH}" &
+            { time python3 -u "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 ; } 2> "${TIME_FILE_PATH}" &
             echo -e "${GREEN}✓ Calculation started in background (PID: $!)${NC}"
         fi
     else
         # Run in foreground
         if [ "$VERBOSE" = True ]; then
-            { time python3 "${SCRIPT_NAME}" 2>&1 | tee "${LOG_FILE_PATH}" ; } 2> "${TIME_FILE_PATH}"
+            { time python3 -u "${SCRIPT_NAME}" 2>&1 | tee "${LOG_FILE_PATH}" ; } 2> "${TIME_FILE_PATH}"
             CALC_EXIT_STATUS=${PIPESTATUS[0]}
         else
-            { time python3 "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 ; } 2> "${TIME_FILE_PATH}"
+            { time python3 -u "${SCRIPT_NAME}" > "${LOG_FILE_PATH}" 2>&1 ; } 2> "${TIME_FILE_PATH}"
             CALC_EXIT_STATUS=$?
         fi
         
