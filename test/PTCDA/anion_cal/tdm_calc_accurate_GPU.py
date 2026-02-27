@@ -188,6 +188,14 @@ SPIN = None
 # For charged systems: cation (+1) typically has spin=2 (doublet), anion (-1) has spin=2 (doublet)
 # Neutral even-electron systems typically have spin=1 (singlet)
 
+ENABLE_CDFT = False
+MONOMER_A_ATOMS = []
+TARGET_CHARGE_A = 0.0
+CDFT_VC_X0 = 0.0
+CDFT_VC_X1 = 0.1
+CDFT_CHARGE_TOL = 1e-4
+CDFT_MAX_ITER = 25
+
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
 XC_FUNCTIONAL = 'wb97x-d3bj'
@@ -506,6 +514,101 @@ def build_mf(mol, verbose_level=VERBOSE_LEVEL):
         mf.verbose = 2  # Minimal
     return mf
 
+
+def _cdft_dm_total(dm):
+    if isinstance(dm, tuple):
+        return dm[0] + dm[1]
+    if hasattr(dm, 'ndim') and dm.ndim == 3 and dm.shape[0] == 2:
+        return dm[0] + dm[1]
+    return dm
+
+
+def _cdft_build_weight_matrix(mol, atom_indices):
+    atom_set = {int(x) for x in atom_indices}
+    if len(atom_set) == 0:
+        raise ValueError('ENABLE_CDFT=True but MONOMER_A_ATOMS is empty')
+
+    ao_labels = mol.ao_labels(fmt=False)
+    nao = mol.nao_nr()
+    if len(ao_labels) != nao:
+        raise ValueError(f'Unexpected ao_labels length {len(ao_labels)} != nao {nao}')
+
+    ao_mask = np.fromiter((lbl[0] in atom_set for lbl in ao_labels), dtype=np.bool_, count=len(ao_labels))
+    if not ao_mask.any():
+        raise ValueError('MONOMER_A_ATOMS selects zero AOs (check 0-indexed atom numbering)')
+
+    s1e = mol.intor('int1e_ovlp')
+    w_cpu = 0.5 * (s1e * ao_mask[:, None] + s1e * ao_mask[None, :])
+    w_gpu = cp.asarray(w_cpu, dtype=cp.float64)
+
+    neutral_elec = sum(mol.atom_charge(a) for a in atom_set)
+    target_pop = float(neutral_elec) - float(TARGET_CHARGE_A)
+
+    return w_gpu, target_pop, neutral_elec
+
+
+def _cdft_population(w_gpu, dm):
+    dm_tot = _cdft_dm_total(dm)
+    dm_tot = cp.asarray(dm_tot, dtype=cp.float64)
+    return cp.einsum('ij,ji->', w_gpu, dm_tot).item()
+
+
+def run_cdft_secant(mf, mol):
+    print('Starting cDFT optimization loop...', flush=True)
+    w_gpu, target_pop, neutral_elec = _cdft_build_weight_matrix(mol, MONOMER_A_ATOMS)
+    print(f'Targeting exactly {target_pop:.6f} electrons on Monomer A (neutral = {neutral_elec}, target charge = {TARGET_CHARGE_A})', flush=True)
+
+    orig_get_hcore = mf.get_hcore
+    dm_prev = None
+
+    def eval_diff(vc, dm0):
+        print(f'  [cDFT] Testing Vc = {vc:.8f} ...', flush=True)
+
+        def get_hcore_cdft(*args, **kwargs):
+            hcore = cp.asarray(orig_get_hcore(*args, **kwargs), dtype=cp.float64)
+            return hcore + (vc * w_gpu)
+
+        mf.get_hcore = get_hcore_cdft
+        mf.kernel(dm0=dm0)
+        dm_new = mf.make_rdm1()
+        pop_a = _cdft_population(w_gpu, dm_new)
+        diff = pop_a - target_pop
+        print(f'  [cDFT] Pop A = {pop_a:.6f} | Diff = {diff:.6e} | E = {mf.e_tot:.10f}', flush=True)
+        return diff, dm_new
+
+    vc0 = float(CDFT_VC_X0)
+    vc1 = float(CDFT_VC_X1)
+    f0, dm_prev = eval_diff(vc0, dm_prev)
+    if abs(f0) < CDFT_CHARGE_TOL:
+        mf.cdft_vc = vc0
+        print(f'✓ cDFT converged (Vc = {vc0:.8f})', flush=True)
+        return
+
+    f1, dm_prev = eval_diff(vc1, dm_prev)
+    if abs(f1) < CDFT_CHARGE_TOL:
+        mf.cdft_vc = vc1
+        print(f'✓ cDFT converged (Vc = {vc1:.8f})', flush=True)
+        return
+
+    for it in range(1, int(CDFT_MAX_ITER) + 1):
+        denom = (f1 - f0)
+        if abs(denom) < 1e-14:
+            vc2 = vc1 + 0.1
+        else:
+            vc2 = vc1 - f1 * (vc1 - vc0) / denom
+
+        vc0, f0 = vc1, f1
+        vc1 = float(vc2)
+        f1, dm_prev = eval_diff(vc1, dm_prev)
+
+        if abs(f1) < CDFT_CHARGE_TOL:
+            mf.cdft_vc = vc1
+            print(f'✓ cDFT converged in {it} secant iterations', flush=True)
+            print(f'✓ Optimal Vc multiplier: {vc1:.8f}', flush=True)
+            return
+
+    raise RuntimeError('cDFT optimization failed to reach the target charge constraint')
+
 # ---------- 2c.  convergence parameters for optimization -----------
 def get_opt_conv_params(conv_preset):
     """Get convergence parameters for geometry optimization."""
@@ -593,7 +696,7 @@ if not ENABLE_DFT and not ENABLE_TDDFT:
 # ---------- 2f.  final SCF (only one kernel call) -----------------
 if ENABLE_DFT:
     print("\n" + "-"*70)
-    print("GROUND STATE DFT CALCULATION")
+    print("GROUND STATE DFT CALCULATION" + (" (WITH cDFT)" if ENABLE_CDFT else ""))
     print("-"*70)
     print(f"XC functional: {XC_FUNCTIONAL} (clean: {clean_xc})")
     print(f"Dispersion: {disp_suffix if disp_suffix else 'None'}")
@@ -602,7 +705,11 @@ if ENABLE_DFT:
     print("-"*70)
 
     mf = build_mf(mol)
-    mf.kernel()
+
+    if ENABLE_CDFT:
+        run_cdft_secant(mf, mol)
+    else:
+        mf.kernel()
 
     if not mf.converged:
         print("⚠ WARNING: SCF did not converge!")

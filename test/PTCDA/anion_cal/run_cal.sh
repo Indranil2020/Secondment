@@ -48,6 +48,23 @@ XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"     # PTCDA Neutral op
 CHARGE="0"
 SPIN=None
 
+# --- Constrained DFT (cDFT) ---
+# Use this for multi-fragment systems to enforce a target charge on a fragment (Monomer A).
+# Notes on functional/basis choices for charge-transfer and cDFT-style constraints:
+# - Best practice (often): range-separated hybrids like wb97x, cam-b3lyp for CT states.
+# - Basis: include diffuse functions for anions/CT: def2-SVPD/def2-TZVPPD/def2-QZVPPD.
+ENABLE_CDFT=False
+# 0-indexed atom indices belonging to Monomer A (space-separated). Example: "0 1 2 3 4"
+MONOMER_A_ATOMS=""
+# Target charge on Monomer A. Example: -1 enforces one extra electron on fragment A.
+TARGET_CHARGE_A=0.0
+# Secant initial guesses for constraint multiplier Vc
+CDFT_VC_X0=0.0
+CDFT_VC_X1=0.1
+# Convergence and iteration limits
+CDFT_CHARGE_TOL=1e-4
+CDFT_MAX_ITER=25
+
 # --- Basis Set ---
 BASIS_SET="def2-TZVPPD"              # Options: 6-31g, 6-31g*, 6-311g**, def2-SVP, def2-TZVP, def2-SVPD, def2-QZVPPD 
 
@@ -229,6 +246,13 @@ updates = {
     'CHARGE': '${CHARGE}',
     'SPIN': '${SPIN}',
     'XC_FUNCTIONAL': "'${XC_FUNCTIONAL}'",
+    # Constrained DFT
+    'ENABLE_CDFT': '${ENABLE_CDFT}',
+    'TARGET_CHARGE_A': '${TARGET_CHARGE_A}',
+    'CDFT_VC_X0': '${CDFT_VC_X0}',
+    'CDFT_VC_X1': '${CDFT_VC_X1}',
+    'CDFT_CHARGE_TOL': '${CDFT_CHARGE_TOL}',
+    'CDFT_MAX_ITER': '${CDFT_MAX_ITER}',
     # Section 4: Geometry Optimization
     'OPTIMISE_GEOMETRY': '${OPTIMISE_GEOMETRY}',
     'OPT_CYCLES': '${OPT_CYCLES}',
@@ -278,6 +302,7 @@ list_configs = {
     'STATES_TO_OUTPUT': '${STATES_TO_OUTPUT}',
     'NTO_STATES': '${NTO_STATES}',
     'CONTRIBUTION_STATES': '${CONTRIBUTION_STATES}',
+    'MONOMER_A_ATOMS': '${MONOMER_A_ATOMS}',
 }
 
 for key, value in list_configs.items():
