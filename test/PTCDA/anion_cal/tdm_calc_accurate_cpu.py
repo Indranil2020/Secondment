@@ -40,6 +40,14 @@ SPIN = None
 # For charged systems: cation (+1) typically has spin=2 (doublet), anion (-1) has spin=2 (doublet)
 # Neutral even-electron systems typically have spin=1 (singlet)
 
+ENABLE_CDFT = False
+MONOMER_A_ATOMS = []
+TARGET_CHARGE_A = 0.0
+CDFT_VC_X0 = 0.0
+CDFT_VC_X1 = 0.1
+CDFT_CHARGE_TOL = 1e-4
+CDFT_MAX_ITER = 25
+
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
 XC_FUNCTIONAL = 'wb97x'
@@ -250,6 +258,8 @@ print("\n" + "="*70)
 print("MOLECULE SETUP")
 print("="*70)
 
+margin_bohr = BOX_MARGIN / 0.529177
+
 if USE_XYZ:
     print(f"Loading molecule from: {XYZ_FILE}")
     print(f"Basis set: {BASIS_SET}")
@@ -357,6 +367,100 @@ def build_mf(mol, verbose_level=VERBOSE_LEVEL):
         mf.verbose = 2  # Minimal
     return mf
 
+
+def _cdft_dm_total(dm):
+    if isinstance(dm, tuple):
+        return dm[0] + dm[1]
+    if hasattr(dm, 'ndim') and dm.ndim == 3 and dm.shape[0] == 2:
+        return dm[0] + dm[1]
+    return dm
+
+
+def _cdft_build_weight_matrix(mol, atom_indices):
+    atom_set = {int(x) for x in atom_indices}
+    if len(atom_set) == 0:
+        raise ValueError('ENABLE_CDFT=True but MONOMER_A_ATOMS is empty')
+
+    ao_labels = mol.ao_labels(fmt=False)
+    nao = mol.nao_nr()
+    if len(ao_labels) != nao:
+        raise ValueError(f'Unexpected ao_labels length {len(ao_labels)} != nao {nao}')
+
+    ao_mask = np.fromiter((lbl[0] in atom_set for lbl in ao_labels), dtype=np.bool_, count=len(ao_labels))
+    if not ao_mask.any():
+        raise ValueError('MONOMER_A_ATOMS selects zero AOs (check 0-indexed atom numbering)')
+
+    s1e = mol.intor('int1e_ovlp')
+    w = 0.5 * (s1e * ao_mask[:, None] + s1e * ao_mask[None, :])
+
+    neutral_elec = sum(mol.atom_charge(a) for a in atom_set)
+    target_pop = float(neutral_elec) - float(TARGET_CHARGE_A)
+
+    return w, target_pop, neutral_elec
+
+
+def _cdft_population(w, dm):
+    dm_tot = _cdft_dm_total(dm)
+    dm_tot = np.asarray(dm_tot, dtype=np.float64)
+    return np.einsum('ij,ji->', w, dm_tot).item()
+
+
+def run_cdft_secant(mf, mol):
+    print('Starting cDFT optimization loop...', flush=True)
+    w, target_pop, neutral_elec = _cdft_build_weight_matrix(mol, MONOMER_A_ATOMS)
+    print(f'Targeting exactly {target_pop:.6f} electrons on Monomer A (neutral = {neutral_elec}, target charge = {TARGET_CHARGE_A})', flush=True)
+
+    orig_get_hcore = mf.get_hcore
+    dm_prev = None
+
+    def eval_diff(vc, dm0):
+        print(f'  [cDFT] Testing Vc = {vc:.8f} ...', flush=True)
+
+        def get_hcore_cdft(*args, **kwargs):
+            hcore = np.asarray(orig_get_hcore(*args, **kwargs), dtype=np.float64)
+            return hcore + (vc * w)
+
+        mf.get_hcore = get_hcore_cdft
+        mf.kernel(dm0=dm0)
+        dm_new = mf.make_rdm1()
+        pop_a = _cdft_population(w, dm_new)
+        diff = pop_a - target_pop
+        print(f'  [cDFT] Pop A = {pop_a:.6f} | Diff = {diff:.6e} | E = {mf.e_tot:.10f}', flush=True)
+        return diff, dm_new
+
+    vc0 = float(CDFT_VC_X0)
+    vc1 = float(CDFT_VC_X1)
+    f0, dm_prev = eval_diff(vc0, dm_prev)
+    if abs(f0) < CDFT_CHARGE_TOL:
+        mf.cdft_vc = vc0
+        print(f'✓ cDFT converged (Vc = {vc0:.8f})', flush=True)
+        return
+
+    f1, dm_prev = eval_diff(vc1, dm_prev)
+    if abs(f1) < CDFT_CHARGE_TOL:
+        mf.cdft_vc = vc1
+        print(f'✓ cDFT converged (Vc = {vc1:.8f})', flush=True)
+        return
+
+    for it in range(1, int(CDFT_MAX_ITER) + 1):
+        denom = (f1 - f0)
+        if abs(denom) < 1e-14:
+            vc2 = vc1 + 0.1
+        else:
+            vc2 = vc1 - f1 * (vc1 - vc0) / denom
+
+        vc0, f0 = vc1, f1
+        vc1 = float(vc2)
+        f1, dm_prev = eval_diff(vc1, dm_prev)
+
+        if abs(f1) < CDFT_CHARGE_TOL:
+            mf.cdft_vc = vc1
+            print(f'✓ cDFT converged in {it} secant iterations', flush=True)
+            print(f'✓ Optimal Vc multiplier: {vc1:.8f}', flush=True)
+            return
+
+    raise RuntimeError('cDFT optimization failed to reach the target charge constraint')
+
 # ---------- 2c.  convergence parameters for optimization -----------
 def get_opt_conv_params(conv_preset):
     """Get convergence parameters for geometry optimization."""
@@ -439,7 +543,7 @@ if not ENABLE_DFT and not ENABLE_TDDFT:
 # ---------- 2f.  final SCF (only one kernel call) -----------------
 if ENABLE_DFT:
     print("\n" + "-"*70)
-    print("GROUND STATE DFT CALCULATION")
+    print("GROUND STATE DFT CALCULATION" + (" (WITH cDFT)" if ENABLE_CDFT else ""))
     print("-"*70)
     print(f"XC functional: {XC_FUNCTIONAL} (clean: {clean_xc})")
     print(f"Dispersion: {disp_suffix if disp_suffix else 'None'}")
@@ -448,7 +552,11 @@ if ENABLE_DFT:
     print("-"*70)
 
     mf = build_mf(mol)
-    mf.kernel()
+
+    if ENABLE_CDFT:
+        run_cdft_secant(mf, mol)
+    else:
+        mf.kernel()
 
     if not mf.converged:
         print("⚠ WARNING: SCF did not converge!")
@@ -459,8 +567,8 @@ if ENABLE_DFT:
     # Print energy with precision based on verbose level
     if VERBOSE_LEVEL >= 2:
         print(f"✓ Ground-state energy: {mf.e_tot:.8f} a.u.")
-else:
-    print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
+    else:
+        print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
 
 # ============================================================================
 # 2. GROUND STATE DFT CALCULATION
@@ -510,9 +618,23 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
     print("\n" + "="*70)
     print("GROUND STATE DENSITY AND POTENTIAL")
     print("="*70)
+
+    coords_ang = mol.atom_coords() * 0.529177
+    mol_size_ang = coords_ang.max(axis=0) - coords_ang.min(axis=0)
+    margin_bohr = BOX_MARGIN / 0.529177
+    if USE_GRID_RESOLUTION:
+        nx_g, ny_g, nz_g = GRID_RESOLUTION
+    else:
+        box_size_ang = mol_size_ang + 2 * BOX_MARGIN
+        nx_g = int(np.ceil(box_size_ang[0] / GRID_SPACING))
+        ny_g = int(np.ceil(box_size_ang[1] / GRID_SPACING))
+        nz_g = int(np.ceil(box_size_ang[2] / GRID_SPACING))
     
     # Calculate ground state density matrix
     dm = mf.make_rdm1()
+
+    # Overlap matrix for correct electron counting in AO basis
+    s1e = mol.intor('int1e_ovlp')
     
     # Handle UKS (sum alpha and beta densities)
     # BOTH CPU and GPU PySCF return shape (2, nao, nao) for UKS!
@@ -524,8 +646,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         
         dm_total = dm_alpha + dm_beta
         
-        n_alpha = np.trace(dm_alpha).item()
-        n_beta = np.trace(dm_beta).item()
+        n_alpha = np.einsum('ij,ji->', dm_alpha, s1e).item()
+        n_beta = np.einsum('ij,ji->', dm_beta, s1e).item()
         
         print("System type: UKS (open-shell)")
         print(f"  Alpha electrons: {n_alpha:.2f}")
@@ -538,8 +660,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         
         dm_total = dm_alpha + dm_beta
         
-        n_alpha = np.trace(dm_alpha).item()
-        n_beta = np.trace(dm_beta).item()
+        n_alpha = np.einsum('ij,ji->', dm_alpha, s1e).item()
+        n_beta = np.einsum('ij,ji->', dm_beta, s1e).item()
         
         print("System type: UKS (open-shell)")
         print(f"  Alpha electrons: {n_alpha:.2f}")
@@ -550,8 +672,8 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
         print("System type: RKS (closed-shell)")
     
     # Calculate total electrons
-    total_electrons = np.trace(dm_total).item()
-    print(f"Total electrons: {total_electrons:.2f}")
+    total_electrons = np.einsum('ij,ji->', dm_total, s1e).item()
+    print(f"Total electrons (Tr[DM*S]): {total_electrons:.6f}")
     print(f"Molecular charge: {CHARGE}")
     print(f"Expected electrons: {mol.nelectron}")
     
@@ -567,109 +689,101 @@ if ENABLE_DFT and (GENERATE_GROUND_STATE_DENSITY or GENERATE_ELECTROSTATIC_POTEN
     if GENERATE_GROUND_STATE_DENSITY:
         density_file = os.path.join(OUTPUT_DIR, 'ground_state_density.cube')
         print(f"\nGenerating ground state charge density...")
-        try:
-            cubegen.density(mol, density_file, dm_total)
-            print(f"  ✓ Ground state density: {density_file}")
-            print(f"    Use this to visualize total electron distribution")
-        except Exception as e:
-            print(f"  ✗ Failed to generate density cube: {str(e)}")
+        cubegen.density(mol, density_file, dm_total, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Ground state density: {density_file}")
+        print(f"    Use this to visualize total electron distribution")
     
     # Generate electrostatic potential cube file
     if GENERATE_ELECTROSTATIC_POTENTIAL:
         esp_file = os.path.join(OUTPUT_DIR, 'electrostatic_potential.cube')
         print(f"\nGenerating electrostatic potential (ESP)...")
-        try:
-            # ESP = Nuclear potential + Electronic potential
-            # cubegen.mep calculates the molecular electrostatic potential
-            from pyscf.tools import cubegen
-            cubegen.mep(mol, esp_file, dm_total)
-            print(f"  ✓ Electrostatic potential: {esp_file}")
-            print(f"    Use this to identify:")
-            print(f"      - Nucleophilic sites (negative ESP, red)")
-            print(f"      - Electrophilic sites (positive ESP, blue)")
-            print(f"      - Reaction sites and molecular recognition")
-        except Exception as e:
-            print(f"  ✗ Failed to generate ESP cube: {str(e)}")
+        # ESP = Nuclear potential + Electronic potential
+        # cubegen.mep calculates the molecular electrostatic potential
+        cubegen.mep(mol, esp_file, dm_total, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Electrostatic potential: {esp_file}")
+        print(f"    Use this to identify:")
+        print(f"      - Nucleophilic sites (negative ESP, red)")
+        print(f"      - Electrophilic sites (positive ESP, blue)")
+        print(f"      - Reaction sites and molecular recognition")
     
     # Generate deformation density (SCF density - Promolecule density)
     if GENERATE_DEFORMATION_DENSITY:
         print(f"\nGenerating deformation density...")
         print(f"  Deformation density = SCF density - Promolecule density")
         print(f"  Shows charge redistribution due to chemical bonding")
-        
-        try:
-            # Get promolecule density (superposition of atomic densities)
-            # This is the non-interacting atomic density (no electron-electron interaction)
-            if actual_spin == 1:
-                # RKS: use scf.hf.init_guess_by_atom for closed-shell systems
-                from pyscf import scf as pyscf_scf
-                dm_promol = pyscf_scf.hf.init_guess_by_atom(mol)
+
+        # Get promolecule density (superposition of atomic densities)
+        # This is the non-interacting atomic density (no electron-electron interaction)
+        if actual_spin == 1:
+            # RKS: use scf.hf.init_guess_by_atom for closed-shell systems
+            from pyscf import scf as pyscf_scf
+            dm_promol = pyscf_scf.hf.init_guess_by_atom(mol)
+            dm_promol = np.asarray(dm_promol, dtype=np.float64)
+
+            promol_e = np.einsum('ij,ji->', dm_promol, s1e).item()
+            print(f"  System: RKS (closed-shell)")
+            print(f"  Promolecule electrons (Tr[DM*S]): {promol_e:.6f}")
+        else:
+            # UKS: use scf.uhf.init_guess_by_atom
+            from pyscf import scf as pyscf_scf
+            dm_promol = pyscf_scf.uhf.init_guess_by_atom(mol)
+
+            # Handle both tuple and array formats
+            if isinstance(dm_promol, tuple):
+                dm_promol_alpha, dm_promol_beta = dm_promol
+                dm_promol_alpha = np.asarray(dm_promol_alpha, dtype=np.float64)
+                dm_promol_beta = np.asarray(dm_promol_beta, dtype=np.float64)
+                dm_promol_total = dm_promol_alpha + dm_promol_beta
+            elif dm_promol.ndim == 3 and dm_promol.shape[0] == 2:
                 dm_promol = np.asarray(dm_promol, dtype=np.float64)
-                
-                print(f"  System: RKS (closed-shell)")
-                print(f"  Promolecule electrons: {np.trace(dm_promol).item():.2f}")
+                dm_promol_alpha = dm_promol[0]
+                dm_promol_beta = dm_promol[1]
+                dm_promol_total = dm_promol_alpha + dm_promol_beta
             else:
-                # UKS: use scf.uhf.init_guess_by_atom
-                from pyscf import scf as pyscf_scf
-                dm_promol = pyscf_scf.uhf.init_guess_by_atom(mol)
-                
-                # Handle both tuple and array formats
-                if isinstance(dm_promol, tuple):
-                    dm_promol_alpha, dm_promol_beta = dm_promol
-                    dm_promol_alpha = np.asarray(dm_promol_alpha, dtype=np.float64)
-                    dm_promol_beta = np.asarray(dm_promol_beta, dtype=np.float64)
-                    dm_promol_total = dm_promol_alpha + dm_promol_beta
-                elif dm_promol.ndim == 3 and dm_promol.shape[0] == 2:
-                    dm_promol = np.asarray(dm_promol, dtype=np.float64)
-                    dm_promol_alpha = dm_promol[0]
-                    dm_promol_beta = dm_promol[1]
-                    dm_promol_total = dm_promol_alpha + dm_promol_beta
-                else:
-                    raise ValueError(f"Unexpected promolecule density format: {type(dm_promol)}, shape: {dm_promol.shape if hasattr(dm_promol, 'shape') else 'N/A'}")
-                
-                print(f"  System: UKS (open-shell)")
-                print(f"  Promolecule alpha electrons: {np.trace(dm_promol_alpha).item():.2f}")
-                print(f"  Promolecule beta electrons: {np.trace(dm_promol_beta).item():.2f}")
-                print(f"  Promolecule total electrons: {np.trace(dm_promol_total).item():.2f}")
-                
-                dm_promol = dm_promol_total
-            
-            # Calculate deformation density
-            deformation_density = dm_total - dm_promol
-            
-            # Verify shapes match
-            if deformation_density.shape != (nao, nao):
-                raise ValueError(f"Deformation density shape {deformation_density.shape} doesn't match AO basis {nao}x{nao}")
-            
-            # Calculate deformation integral (should be close to 0)
-            deformation_integral = np.trace(deformation_density).item()
-            max_deformation = np.max(np.abs(deformation_density))
-            
-            print(f"  Deformation integral: {deformation_integral:.6f} (should be ~0)")
-            print(f"  Max |deformation|: {max_deformation:.6f}")
-            
-            # Save cube files
-            scf_density_file = os.path.join(OUTPUT_DIR, 'scf_density.cube')
-            promol_density_file = os.path.join(OUTPUT_DIR, 'promolecule_density.cube')
-            deform_density_file = os.path.join(OUTPUT_DIR, 'deformation_density.cube')
-            
-            cubegen.density(mol, scf_density_file, dm_total)
-            print(f"  ✓ SCF density: {scf_density_file}")
-            
-            cubegen.density(mol, promol_density_file, dm_promol)
-            print(f"  ✓ Promolecule density: {promol_density_file}")
-            
-            cubegen.density(mol, deform_density_file, deformation_density)
-            print(f"  ✓ Deformation density: {deform_density_file}")
-            
-            print(f"  Interpretation:")
-            print(f"    - Positive regions (red): electron accumulation (bonding)")
-            print(f"    - Negative regions (blue): electron depletion (atomic cores)")
-            
-        except Exception as e:
-            print(f"  ✗ Failed to generate deformation density: {str(e)}")
-            import traceback
-            traceback.print_exc()
+                raise ValueError(f"Unexpected promolecule density format: {type(dm_promol)}, shape: {dm_promol.shape if hasattr(dm_promol, 'shape') else 'N/A'}")
+
+            promol_a_e = np.einsum('ij,ji->', dm_promol_alpha, s1e).item()
+            promol_b_e = np.einsum('ij,ji->', dm_promol_beta, s1e).item()
+            promol_e = promol_a_e + promol_b_e
+
+            print(f"  System: UKS (open-shell)")
+            print(f"  Promolecule alpha electrons (Tr[DM*S]): {promol_a_e:.6f}")
+            print(f"  Promolecule beta electrons (Tr[DM*S]): {promol_b_e:.6f}")
+            print(f"  Promolecule total electrons (Tr[DM*S]): {promol_e:.6f}")
+
+            dm_promol = dm_promol_total
+
+        # Calculate deformation density
+        deformation_density = dm_total - dm_promol
+
+        # Verify shapes match
+        if deformation_density.shape != (nao, nao):
+            raise ValueError(f"Deformation density shape {deformation_density.shape} doesn't match AO basis {nao}x{nao}")
+
+        # Calculate deformation integral (should be close to 0)
+        deformation_integral = np.einsum('ij,ji->', deformation_density, s1e).item()
+        max_deformation = np.max(np.abs(deformation_density))
+
+        print(f"  Deformation integral (Tr[ΔDM*S]): {deformation_integral:.6f} (should be ~0)")
+        print(f"  Max |deformation|: {max_deformation:.6f}")
+
+        # Save cube files
+        scf_density_file = os.path.join(OUTPUT_DIR, 'scf_density.cube')
+        promol_density_file = os.path.join(OUTPUT_DIR, 'promolecule_density.cube')
+        deform_density_file = os.path.join(OUTPUT_DIR, 'deformation_density.cube')
+
+        cubegen.density(mol, scf_density_file, dm_total, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ SCF density: {scf_density_file}")
+
+        cubegen.density(mol, promol_density_file, dm_promol, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Promolecule density: {promol_density_file}")
+
+        cubegen.density(mol, deform_density_file, deformation_density, nx=nx_g, ny=ny_g, nz=nz_g, margin=margin_bohr)
+        print(f"  ✓ Deformation density: {deform_density_file}")
+
+        print(f"  Interpretation:")
+        print(f"    - Positive regions (red): electron accumulation (bonding)")
+        print(f"    - Negative regions (blue): electron depletion (atomic cores)")
     
     print("="*70)
 
@@ -768,6 +882,8 @@ ground_state_energy_gs_geom = mf.e_tot
 
 emission_energies = {}
 emission_mol = None  # Will store the optimized excited state geometry
+td_emission = None
+mf_emission = None
 
 if ENABLE_EMISSION and ENABLE_TDDFT:
     print("\n" + "="*70)
@@ -991,22 +1107,49 @@ def calculate_transition_dipole(td, state_id):
     
     return tdm
 
+def calculate_transition_dipole_with_ints(td_obj, state_id, dip_ints_use):
+    tdm_ao = calculate_transition_dipole(td_obj, state_id)
+    return tdm_ao, float(np.linalg.norm(tdm_ao))
+
+
 # Calculate and print transition dipoles for all states
-print("\nTransition dipole moments (a.u.):")
-print(f"{'State':<8} {'μ_x':<12} {'μ_y':<12} {'μ_z':<12} {'|μ|':<12} {'f':<12}")
+print("\n--- ABSORPTION Transition Dipole Moments (at ground state geometry) ---")
+print("These TDMs correspond to S₀ → Sₙ transitions (light absorption)")
+print(f"\n{'State':<8} {'μ_x':<12} {'μ_y':<12} {'μ_z':<12} {'|μ|':<12} {'f':<12}")
 print("-" * 70)
 
 for i in range(td.nstates):
-    tdm = calculate_transition_dipole(td, i)
-    tdm_magnitude = np.linalg.norm(tdm)
-    
+    tdm, tdm_magnitude = calculate_transition_dipole_with_ints(td, i, dip_ints)
+
     # Oscillator strength: f = (2/3) * ω * |μ|^2
     # where ω is excitation energy in a.u.
     omega = td.e[i]
     osc_strength = (2.0/3.0) * omega * tdm_magnitude**2
-    
+
     print(f"{i+1:<8} {tdm[0]:>11.6f} {tdm[1]:>11.6f} {tdm[2]:>11.6f} "
           f"{tdm_magnitude:>11.6f} {osc_strength:>11.6f}")
+
+# EMISSION TDMs: at excited state geometry (if emission calculation was done)
+if td_emission is not None and emission_mol is not None:
+    print("\n--- EMISSION Transition Dipole Moments (at excited state geometry) ---")
+    print("These TDMs correspond to Sₙ → S₀ transitions (fluorescence emission)")
+    print("Note: Calculated from TDDFT at the optimized excited state geometry")
+
+    emission_charges = emission_mol.atom_charges()
+    emission_coords = emission_mol.atom_coords()
+    emission_nuc_center = np.einsum('z,zx->x', emission_charges, emission_coords) / emission_charges.sum()
+    emission_mol.set_common_orig_(emission_nuc_center)
+    dip_ints_emission = emission_mol.intor('int1e_r', comp=3)
+
+    print(f"\n{'State':<8} {'μ_x':<12} {'μ_y':<12} {'μ_z':<12} {'|μ|':<12} {'f':<12}")
+    print("-" * 70)
+
+    for i in range(td_emission.nstates):
+        tdm_em, tdm_em_magnitude = calculate_transition_dipole_with_ints(td_emission, i, dip_ints_emission)
+        omega_em = td_emission.e[i]
+        osc_strength_em = (2.0/3.0) * omega_em * tdm_em_magnitude**2
+        print(f"{i+1:<8} {tdm_em[0]:>11.6f} {tdm_em[1]:>11.6f} {tdm_em[2]:>11.6f} "
+              f"{tdm_em_magnitude:>11.6f} {osc_strength_em:>11.6f}")
 
 print("="*70)
 
@@ -1110,9 +1253,72 @@ def calculate_excited_state_density(td, state_id):
     is_tda = not hasattr(Y, 'shape')
     
     if is_uks:
-        # UKS case - simplified approach: use transition density
-        # For visualization, transition density is more meaningful
-        return calculate_transition_density_matrix(td, state_id)
+        # UKS case - proper excited state density
+        # ρ_excited = ρ_ground + Δρ_alpha + Δρ_beta
+        # where Δρ comes from the TDDFT response (X,Y amplitudes)
+        Xa, Xb = X
+
+        # For UKS, Y can be (Ya,Yb) or 0 (TDA)
+        is_tda = not isinstance(Y, tuple) or (isinstance(Y, tuple) and not hasattr(Y[0], 'shape'))
+        if is_tda:
+            Ya = Yb = 0
+        else:
+            Ya, Yb = Y
+
+        # mo_coeff/mo_occ can be tuples (alpha,beta)
+        mo_coeff_a, mo_coeff_b = mo_coeff
+        mo_occ_a, mo_occ_b = mo_occ
+
+        dm0 = mf.make_rdm1()
+        if isinstance(dm0, tuple):
+            dm0_a, dm0_b = dm0
+        else:
+            dm0 = np.asarray(dm0)
+            if dm0.ndim == 3 and dm0.shape[0] == 2:
+                dm0_a, dm0_b = dm0[0], dm0[1]
+            else:
+                raise ValueError(f"Unexpected UKS ground-state density matrix format: {type(dm0)}, shape={getattr(dm0,'shape',None)}")
+
+        occ_a = mo_occ_a > 0
+        vir_a = mo_occ_a == 0
+        orbo_a = mo_coeff_a[:, occ_a]
+        orbv_a = mo_coeff_a[:, vir_a]
+        if Xa.shape != (orbo_a.shape[1], orbv_a.shape[1]):
+            raise ValueError(f"Xa shape {Xa.shape} does not match (nocc,nvir)=({orbo_a.shape[1]},{orbv_a.shape[1]})")
+
+        dm_oo_a = -np.einsum('ia,ka->ik', Xa.conj(), Xa)
+        dm_vv_a = np.einsum('ia,ic->ac', Xa, Xa.conj())
+        if not is_tda:
+            dm_oo_a -= np.einsum('ia,ka->ik', Ya.conj(), Ya)
+            dm_vv_a += np.einsum('ia,ic->ac', Ya, Ya.conj())
+
+        delta_ao_a = (
+            np.einsum('pi,ij,qj->pq', orbo_a, dm_oo_a, orbo_a.conj())
+            + np.einsum('pa,ab,qb->pq', orbv_a, dm_vv_a, orbv_a.conj())
+        )
+        dm_ao_a = np.asarray(dm0_a, dtype=np.float64) + np.asarray(delta_ao_a.real, dtype=np.float64)
+
+        occ_b = mo_occ_b > 0
+        vir_b = mo_occ_b == 0
+        orbo_b = mo_coeff_b[:, occ_b]
+        orbv_b = mo_coeff_b[:, vir_b]
+        if Xb.shape != (orbo_b.shape[1], orbv_b.shape[1]):
+            raise ValueError(f"Xb shape {Xb.shape} does not match (nocc,nvir)=({orbo_b.shape[1]},{orbv_b.shape[1]})")
+
+        dm_oo_b = -np.einsum('ia,ka->ik', Xb.conj(), Xb)
+        dm_vv_b = np.einsum('ia,ic->ac', Xb, Xb.conj())
+        if not is_tda:
+            dm_oo_b -= np.einsum('ia,ka->ik', Yb.conj(), Yb)
+            dm_vv_b += np.einsum('ia,ic->ac', Yb, Yb.conj())
+
+        delta_ao_b = (
+            np.einsum('pi,ij,qj->pq', orbo_b, dm_oo_b, orbo_b.conj())
+            + np.einsum('pa,ab,qb->pq', orbv_b, dm_vv_b, orbv_b.conj())
+        )
+        dm_ao_b = np.asarray(dm0_b, dtype=np.float64) + np.asarray(delta_ao_b.real, dtype=np.float64)
+
+        dm_excited = dm_ao_a + dm_ao_b
+        return np.asarray(dm_excited.real, dtype=np.float64)
     else:
         # RKS case
         # For TDDFT, need to consider both X and Y
@@ -1355,7 +1561,7 @@ def analyze_transition_contributions(td, state_id, mf, threshold=0.01, top_n=10)
     
     return all_contributions[:top_n], total_weight
 
-def calculate_pair_transition_density(mf, occ_idx, vir_idx):
+def calculate_pair_transition_density(mf, occ_idx, vir_idx, spin='alpha'):
     """
     Calculate transition density matrix for a single orbital pair i→a.
     Handles both RKS and UKS (uses alpha spin for UKS).
@@ -1369,30 +1575,36 @@ def calculate_pair_transition_density(mf, occ_idx, vir_idx):
     # Ensure we have NumPy array
     mo_coeff = np.asarray(mo_coeff)
     
-    # Handle UKS (use alpha spin)
-    # UKS can be: tuple (dm_alpha, dm_beta) OR array with shape (2, nao, nmo)
+    is_uks = False
     if isinstance(mo_coeff, tuple):
-        mo_coeff_alpha = mo_coeff[0]
+        is_uks = True
+        mo_coeff_alpha = np.asarray(mo_coeff[0])
+        mo_coeff_beta = np.asarray(mo_coeff[1])
     elif mo_coeff.ndim == 3 and mo_coeff.shape[0] == 2:
-        # Modern PySCF UKS format: (2, nao, nmo)
-        mo_coeff_alpha = mo_coeff[0]
+        is_uks = True
+        mo_coeff_alpha = np.asarray(mo_coeff[0])
+        mo_coeff_beta = np.asarray(mo_coeff[1])
     else:
-        # RKS: single 2D array
-        mo_coeff_alpha = mo_coeff
-    
-    # Ensure alpha coefficients are 2D
-    mo_coeff_alpha = np.asarray(mo_coeff_alpha)
-    if mo_coeff_alpha.ndim != 2:
-        raise ValueError(f"mo_coeff_alpha must be 2D, got shape {mo_coeff_alpha.shape}, ndim={mo_coeff_alpha.ndim}")
+        mo_coeff_use = mo_coeff
+
+    if is_uks:
+        if spin.lower() == 'beta':
+            mo_coeff_use = mo_coeff_beta
+        else:
+            mo_coeff_use = mo_coeff_alpha
+
+    mo_coeff_use = np.asarray(mo_coeff_use)
+    if mo_coeff_use.ndim != 2:
+        raise ValueError(f"mo_coeff must be 2D, got shape {mo_coeff_use.shape}, ndim={mo_coeff_use.ndim}")
     
     # Check if indices are valid
-    nao, nmo = mo_coeff_alpha.shape
+    nao, nmo = mo_coeff_use.shape
     if occ_idx >= nmo or vir_idx >= nmo:
         raise IndexError(f"Orbital indices out of range: occ_idx={occ_idx}, vir_idx={vir_idx}, but only {nmo} MOs available (nao={nao})")
     
     # Extract specific orbitals
-    occ_mo = mo_coeff_alpha[:, occ_idx]
-    vir_mo = mo_coeff_alpha[:, vir_idx]
+    occ_mo = mo_coeff_use[:, occ_idx]
+    vir_mo = mo_coeff_use[:, vir_idx]
     
     # Transition density matrix for this pair in AO basis
     # T_μν = C_μ^i × C_ν^a + C_μ^a × C_ν^i (symmetric)
@@ -1663,23 +1875,23 @@ if GENERATE_HOMO_LUMO:
     
     # Generate HOMO cube file
     homo_file = os.path.join(OUTPUT_DIR, 'HOMO.cube')
-    cubegen.orbital(mol, homo_file, mo_coeff[:, homo_idx], nx=nx, ny=ny, nz=nz)
+    cubegen.orbital(mol, homo_file, mo_coeff[:, homo_idx], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
     print(f"\n  ✓ HOMO orbital: {homo_file}")
     
     # Generate LUMO cube file
     lumo_file = os.path.join(OUTPUT_DIR, 'LUMO.cube')
-    cubegen.orbital(mol, lumo_file, mo_coeff[:, lumo_idx], nx=nx, ny=ny, nz=nz)
+    cubegen.orbital(mol, lumo_file, mo_coeff[:, lumo_idx], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
     print(f"  ✓ LUMO orbital: {lumo_file}")
     
     # Generate HOMO-1 and LUMO+1 for additional verification
     if homo_idx > 0:
         homo1_file = os.path.join(OUTPUT_DIR, 'HOMO-1.cube')
-        cubegen.orbital(mol, homo1_file, mo_coeff[:, homo_idx-1], nx=nx, ny=ny, nz=nz)
+        cubegen.orbital(mol, homo1_file, mo_coeff[:, homo_idx-1], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
         print(f"  ✓ HOMO-1 orbital: {homo1_file}")
     
     if lumo_idx < len(mo_occ) - 1:
         lumo1_file = os.path.join(OUTPUT_DIR, 'LUMO+1.cube')
-        cubegen.orbital(mol, lumo1_file, mo_coeff[:, lumo_idx+1], nx=nx, ny=ny, nz=nz)
+        cubegen.orbital(mol, lumo1_file, mo_coeff[:, lumo_idx+1], nx=nx, ny=ny, nz=nz, margin=margin_bohr)
         print(f"  ✓ LUMO+1 orbital: {lumo1_file}")
     
     print("\nVerification tip:")
@@ -1704,7 +1916,7 @@ if GENERATE_HOMO_LUMO:
     
     # Generate cube file for HOMO→LUMO transition density
     homo_lumo_file = os.path.join(OUTPUT_DIR, 'transition_HOMO_LUMO_analytical.cube')
-    cubegen.density(mol, homo_lumo_file, t_homo_lumo, nx=nx, ny=ny, nz=nz)
+    cubegen.density(mol, homo_lumo_file, t_homo_lumo, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
     print(f"  ✓ Analytical HOMO→LUMO transition: {homo_lumo_file}")
     
     print("\nTo verify S1 is a HOMO→LUMO transition, compare:")
@@ -1741,14 +1953,14 @@ else:
         if GENERATE_TRANSITION_DENSITY:
             dm_trans = calculate_transition_density_matrix(td, state_id)
             filename_trans = os.path.join(OUTPUT_DIR, f'transition_density_state{state_id+1}.cube')
-            cubegen.density(mol, filename_trans, dm_trans, nx=nx, ny=ny, nz=nz)
+            cubegen.density(mol, filename_trans, dm_trans, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
             print(f"  ✓ Transition density: {filename_trans}")
         
         # 2. Excited state density
         if GENERATE_EXCITED_DENSITY:
             dm_excited = calculate_excited_state_density(td, state_id)
             filename_excited = os.path.join(OUTPUT_DIR, f'excited_state_density_state{state_id+1}.cube')
-            cubegen.density(mol, filename_excited, dm_excited, nx=nx, ny=ny, nz=nz)
+            cubegen.density(mol, filename_excited, dm_excited, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
             print(f"  ✓ Excited state density: {filename_excited}")
         
         # 3. Density difference
@@ -1765,7 +1977,7 @@ else:
             
             dm_diff = dm_excited - dm_ground
             filename_diff = os.path.join(OUTPUT_DIR, f'density_difference_state{state_id+1}.cube')
-            cubegen.density(mol, filename_diff, dm_diff, nx=nx, ny=ny, nz=nz)
+            cubegen.density(mol, filename_diff, dm_diff, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
             print(f"  ✓ Density difference: {filename_diff}")
         
         # Quantitative verification for first state
@@ -1861,7 +2073,7 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
         print(f"\nState {state_id+1} ({excitation_energy:.4f} eV):")
         
         pair_count = 0
-        for rank, (occ_idx, vir_idx, weight, label, spin) in enumerate(contributions, 1):
+        for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
             if pair_count >= MAX_PAIRS_PER_STATE:
                 break
             
@@ -1869,8 +2081,10 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
                 print(f"  Skipping {label} (contribution {weight*100:.2f}% < {PAIR_CONTRIBUTION_CUTOFF*100:.0f}%)")
                 continue
             
+            spin_channel = 'beta' if spin == 'β' else 'alpha'
+
             # Calculate transition density for this pair
-            t_dm_pair = calculate_pair_transition_density(mf, occ_idx, vir_idx)
+            t_dm_pair = calculate_pair_transition_density(mf, occ_idx, vir_idx, spin=spin_channel)
             
             # Debug: Check dimensions
             nao = mol.nao_nr()
@@ -1883,17 +2097,15 @@ if ENABLE_CONTRIBUTION_ANALYSIS and GENERATE_PAIR_CUBES and 'all_contributions' 
             labels, _ = get_orbital_labels(mf)
             occ_label = labels[occ_idx].replace('-', 'm').replace('+', 'p')
             vir_label = labels[vir_idx].replace('-', 'm').replace('+', 'p')
+
+            spin_suffix = f"_{spin_channel}" if spin else ""
             
             filename = os.path.join(OUTPUT_DIR, 
-                f'transition_pair_state{state_id+1}_{occ_label}_to_{vir_label}.cube')
-            
-            try:
-                cubegen.density(mol, filename, t_dm_pair, nx=nx, ny=ny, nz=nz)
-                print(f"  ✓ Rank {rank}: {label} ({weight*100:.2f}%) → {filename}")
-                pair_count += 1
-            except (AssertionError, ValueError) as e:
-                print(f"  ✗ Failed to generate cube for {label}: {str(e)}")
-                continue
+                f'transition_pair_state{state_id+1}_{occ_label}_to_{vir_label}{spin_suffix}.cube')
+
+            cubegen.density(mol, filename, t_dm_pair, nx=nx, ny=ny, nz=nz, margin=margin_bohr)
+            print(f"  ✓ Rank {rank}: {label} ({weight*100:.2f}%) → {filename}")
+            pair_count += 1
     
     print("="*70)
 

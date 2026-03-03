@@ -178,23 +178,23 @@ NUM_THREADS = 0
 # --- Molecule Selection ---
 USE_XYZ = True
 # XYZ_FILE = 'H2O.xyz'  # Path to XYZ file
-XYZ_FILE = 'opt/charge0/wb97x_d3bj/optimised_structure.xyz'
-BASIS_SET = 'def2-TZVPPD'
+XYZ_FILE = '/home/indranil/Documents/Secondment/test/PTCDA/anion_cal/opt/charge-1/wb97x_d3bj/ptcda_anion_dimer_T_from_molecules_ini.xyz'
+BASIS_SET = '6-31g*'
 
 # --- Charge and Spin Settings ---
-CHARGE = 0
+CHARGE = -1
 SPIN = None
 # Note: Spin is auto-calculated from electron count if set to None
 # For charged systems: cation (+1) typically has spin=2 (doublet), anion (-1) has spin=2 (doublet)
 # Neutral even-electron systems typically have spin=1 (singlet)
 
-ENABLE_CDFT = False
-MONOMER_A_ATOMS = []
-TARGET_CHARGE_A = 0.0
+ENABLE_CDFT = True
+MONOMER_A_ATOMS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
+TARGET_CHARGE_A = -1.0
 CDFT_VC_X0 = 0.0
 CDFT_VC_X1 = 0.1
 CDFT_CHARGE_TOL = 1e-4
-CDFT_MAX_ITER = 25
+CDFT_MAX_ITER = 250
 
 # --- DFT/TDDFT Settings ---
 # Note: TDDFT uses the same basis set and XC functional as ground state DFT
@@ -236,13 +236,13 @@ EMISSION_OPT_MAX_STEPS = 200
 EMISSION_OPT_CONV = 'normal'
 
 # --- Geometry Optimization Settings ---
-OPTIMISE_GEOMETRY = True
+OPTIMISE_GEOMETRY = False
 OPT_CYCLES = 5
 OPT_MAX_STEPS = 150
 OPT_CONV_PARAMS = 'tight'
 
 # --- Verbose/Debug Settings ---
-VERBOSE_LEVEL = 4
+VERBOSE_LEVEL = 3
 # TDA (Tamm-Dancoff Approximation) is recommended for large systems or initial testing
 # For charged/open-shell systems, TDDFT automatically uses appropriate method
 # Closed-shell (spin=1): Uses RKS/TDDFT or RKS/TDA
@@ -269,8 +269,8 @@ USE_GRID_RESOLUTION = False
 GRID_RESOLUTION = [80, 80, 80]
 
 # Option 2: Use box dimensions (in Angstrom) - only used if USE_GRID_RESOLUTION = False
-BOX_MARGIN = 15
-GRID_SPACING = 0.15
+BOX_MARGIN = 4
+GRID_SPACING = 0.2
 
 # --- NTO Analysis ---
 # NTO_STATES: Which states to perform NTO ANALYSIS for (0-indexed)
@@ -298,7 +298,7 @@ GENERATE_ELECTROSTATIC_POTENTIAL = True
 GENERATE_DEFORMATION_DENSITY = True
 
 # --- Output Directory ---
-OUTPUT_DIR = 'optimised_structure_wb97x_d3bj_def2_tzvppd_gpu_charge0'
+OUTPUT_DIR = 'ptcda_anion_dimer_T_from_molecules_ini_wb97x_d3bj_6_31g__gpu_charge-1'
 
 # ============================================================================
 # END OF CONFIGURATION
