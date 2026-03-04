@@ -17,10 +17,13 @@ Requirements:
 
 from pyscf import gto, lib
 from pyscf.tools import cubegen, molden
+from pyscf import qmmm
+from pyscf.scf import hf
 from gpu4pyscf import dft 
 from gpu4pyscf.tdscf import rks as gpu_tdrks, uks as gpu_tduks
 import numpy as np
 import cupy as cp
+import json
 from functools import reduce
 # Note: Dispersion correction is handled via mf.disp='d3bj' (PySCF built-in)
 # External DFTD3 library is NOT required for standard dispersion calculations
@@ -300,6 +303,27 @@ GENERATE_DEFORMATION_DENSITY = True
 # --- Output Directory ---
 OUTPUT_DIR = 'ptcda_anion_dimer_T_from_molecules_ini_wb97x_d3bj_6_31g__gpu_charge-1'
 
+ENABLE_QMMM_EMBEDDING = False
+QMMM_RUN_ISOLATED_AND_EMBEDDED = False
+QMMM_MODE = 'from_file'
+QMMM_UNIT = 'Angstrom'
+QMMM_QM_ATOMS = []
+QMMM_MM_ATOMS = []
+QMMM_MM_COORDS_CHARGES_FILE = ''
+QMMM_MM_CHARGE_FILE = ''
+QMMM_EXPORT_SHIFT_JSON = True
+
+EXPORT_JSON_SUMMARY = False
+EXPORT_QM_MATRICES = False
+EXPORT_CHECKPOINT = False
+EXPORT_GS_ATOMIC_CHARGES = False
+GS_CHARGES_METHOD = 'mulliken'
+EXPORT_TRANSITION_CHARGES = False
+TRANSITION_CHARGE_STATES = []
+TRANSITION_CHARGES_METHOD = 'mulliken'
+EXPORT_POLARIZABILITY = False
+FINITE_FIELD_STRENGTH_AU = 1e-4
+
 # ============================================================================
 # END OF CONFIGURATION
 # ============================================================================
@@ -423,6 +447,50 @@ else:
     print(f"Basis set: {BASIS_SET}")
     mol = create_h2o_molecule()
     actual_spin = 1  # H2O is singlet
+
+qmmm_mm_coords = None
+qmmm_mm_charges = None
+if ENABLE_QMMM_EMBEDDING:
+    if not USE_XYZ:
+        raise ValueError('ENABLE_QMMM_EMBEDDING=True requires USE_XYZ=True')
+
+    mol_all = gto.M(atom=XYZ_FILE, basis=BASIS_SET, charge=0, spin=0, verbose=0)
+    coords_all = mol_all.atom_coords(unit='Angstrom')
+    symbols_all = [mol_all.atom_symbol(i) for i in range(mol_all.natm)]
+
+    if QMMM_MODE == 'from_file':
+        mm_data = np.loadtxt(QMMM_MM_COORDS_CHARGES_FILE, ndmin=2)
+        if mm_data.shape[1] != 4:
+            raise ValueError('QMMM_MM_COORDS_CHARGES_FILE must have 4 columns: x y z q')
+        qmmm_mm_coords = mm_data[:, :3]
+        qmmm_mm_charges = mm_data[:, 3]
+    elif QMMM_MODE == 'from_dimer_xyz':
+        qm_set = {int(i) for i in QMMM_QM_ATOMS}
+        if len(QMMM_MM_ATOMS) > 0:
+            mm_atoms = [int(i) for i in QMMM_MM_ATOMS]
+        else:
+            mm_atoms = [i for i in range(mol_all.natm) if i not in qm_set]
+        if len(mm_atoms) == 0:
+            raise ValueError('No MM atoms selected (check QMMM_QM_ATOMS / QMMM_MM_ATOMS)')
+        qmmm_mm_coords = coords_all[mm_atoms]
+        qmmm_mm_charges = np.loadtxt(QMMM_MM_CHARGE_FILE)
+        qmmm_mm_charges = np.asarray(qmmm_mm_charges, dtype=float).reshape(-1)
+        if qmmm_mm_charges.shape[0] != len(mm_atoms):
+            raise ValueError('QMMM_MM_CHARGE_FILE length does not match selected MM atoms')
+    else:
+        raise ValueError('Unknown QMMM_MODE')
+
+    if qmmm_mm_coords is None or qmmm_mm_charges is None:
+        raise ValueError('Failed to load MM charges/coords')
+
+    if len(QMMM_QM_ATOMS) > 0:
+        qm_atoms = [int(i) for i in QMMM_QM_ATOMS]
+        atom_list = [(symbols_all[i], tuple(coords_all[i])) for i in qm_atoms]
+        mol_temp_qm = gto.M(atom=atom_list, basis=BASIS_SET, charge=0, spin=0, verbose=0)
+        n_electrons_qm = mol_temp_qm.nelectron
+        spin_qm = SPIN if SPIN is not None else calculate_spin_multiplicity(n_electrons_qm, CHARGE)
+        mol = gto.M(atom=atom_list, basis=BASIS_SET, charge=CHARGE, spin=spin_qm-1, verbose=0)
+        actual_spin = spin_qm
 
 print(f"Number of atoms: {mol.natm}")
 print(f"Number of electrons: {mol.nelectron}")
@@ -551,6 +619,198 @@ def _cdft_population(w_gpu, dm):
     dm_tot = _cdft_dm_total(dm)
     dm_tot = cp.asarray(dm_tot, dtype=cp.float64)
     return cp.einsum('ij,ji->', w_gpu, dm_tot).item()
+
+
+def _dm_total_from_mf(mf_obj):
+    dm = mf_obj.make_rdm1()
+    if isinstance(dm, tuple):
+        dm_tot = dm[0] + dm[1]
+    elif hasattr(dm, 'ndim') and dm.ndim == 3 and dm.shape[0] == 2:
+        dm_tot = dm[0] + dm[1]
+    else:
+        dm_tot = dm
+    if hasattr(dm_tot, 'get'):
+        dm_tot = dm_tot.get()
+    return np.asarray(dm_tot)
+
+
+def _apply_mm_embedding(mf_obj, mol_obj, mm_coords, mm_charges, unit):
+    unit_lower = str(unit).lower()
+    if unit_lower in ('angstrom', 'ang', 'a'):
+        factor = 1.0 / 0.529177210903
+    elif unit_lower in ('bohr', 'au', 'a.u.'):
+        factor = 1.0
+    else:
+        raise ValueError('Unknown QMMM_UNIT')
+
+    coords_bohr = np.asarray(mm_coords, dtype=float) * factor
+    charges = np.asarray(mm_charges, dtype=float).reshape(-1)
+    if coords_bohr.ndim != 2 or coords_bohr.shape[1] != 3:
+        raise ValueError('MM coords must have shape (N,3)')
+    if charges.shape[0] != coords_bohr.shape[0]:
+        raise ValueError('MM charges length does not match MM coords')
+
+    j3c = mol_obj.intor('int1e_grids', hermi=1, grids=coords_bohr)
+    v_add_cpu = np.einsum('kpq,k->pq', j3c, -charges)
+    v_add_gpu = cp.asarray(v_add_cpu, dtype=cp.float64)
+
+    qm_coords = mol_obj.atom_coords()
+    qm_charges = mol_obj.atom_charges()
+    r = np.linalg.norm(qm_coords[:, None, :] - coords_bohr[None, :, :], axis=2)
+    nuc_mm = float(np.einsum('a,ak,k->', qm_charges, 1.0 / r, charges))
+
+    orig_get_hcore = mf_obj.get_hcore
+    orig_energy_nuc = mf_obj.energy_nuc
+
+    def get_hcore_with_mm(*args, **kwargs):
+        hcore = orig_get_hcore(*args, **kwargs)
+        if hasattr(hcore, 'get'):
+            hcore = cp.asarray(hcore, dtype=cp.float64)
+        else:
+            hcore = cp.asarray(np.asarray(hcore, dtype=np.float64), dtype=cp.float64)
+        return hcore + v_add_gpu
+
+    def energy_nuc_with_mm():
+        return float(orig_energy_nuc()) + nuc_mm
+
+    mf_obj.get_hcore = get_hcore_with_mm
+    mf_obj.energy_nuc = energy_nuc_with_mm
+    return mf_obj
+
+
+def _compute_atomic_charges(method, mol_obj, dm_ao, s1e):
+    if method == 'mulliken':
+        _, chg = hf.mulliken_pop(mol_obj, dm_ao, s=s1e, verbose=0)
+        return chg
+    if method == 'meta_lowdin':
+        _, chg = hf.mulliken_meta(mol_obj, dm_ao, s=s1e, verbose=0)
+        return chg
+    raise ValueError('Unknown charges method')
+
+
+def _export_qm_matrices(mol_obj, mf_obj, outdir):
+    overlap = mol_obj.intor('int1e_ovlp')
+    mo_coeff = mf_obj.mo_coeff
+    mo_occ = mf_obj.mo_occ
+    mo_energy = mf_obj.mo_energy
+
+    if isinstance(mo_coeff, tuple):
+        mo_coeff_a, mo_coeff_b = mo_coeff
+        mo_occ_a, mo_occ_b = mo_occ
+        mo_energy_a, mo_energy_b = mo_energy
+        if hasattr(mo_coeff_a, 'get'):
+            mo_coeff_a = mo_coeff_a.get()
+            mo_coeff_b = mo_coeff_b.get()
+            mo_occ_a = mo_occ_a.get()
+            mo_occ_b = mo_occ_b.get()
+            mo_energy_a = mo_energy_a.get()
+            mo_energy_b = mo_energy_b.get()
+        np.savez(os.path.join(outdir, 'qm_matrices.npz'),
+                 overlap=overlap,
+                 mo_coeff_alpha=mo_coeff_a,
+                 mo_coeff_beta=mo_coeff_b,
+                 mo_occ_alpha=mo_occ_a,
+                 mo_occ_beta=mo_occ_b,
+                 mo_energy_alpha=mo_energy_a,
+                 mo_energy_beta=mo_energy_b,
+                 atom_coords_ang=mol_obj.atom_coords(unit='Angstrom'),
+                 atom_charges=mol_obj.atom_charges(),
+                 charge=int(mol_obj.charge),
+                 spin_2S=int(mol_obj.spin))
+    else:
+        if hasattr(mo_coeff, 'get'):
+            mo_coeff = mo_coeff.get()
+            mo_occ = mo_occ.get()
+            mo_energy = mo_energy.get()
+        np.savez(os.path.join(outdir, 'qm_matrices.npz'),
+                 overlap=overlap,
+                 mo_coeff=mo_coeff,
+                 mo_occ=mo_occ,
+                 mo_energy=mo_energy,
+                 atom_coords_ang=mol_obj.atom_coords(unit='Angstrom'),
+                 atom_charges=mol_obj.atom_charges(),
+                 charge=int(mol_obj.charge),
+                 spin_2S=int(mol_obj.spin))
+
+
+def _export_transition_charges(td_obj, mol_obj, method, state_ids, outdir):
+    s1e = mol_obj.intor('int1e_ovlp')
+    for state_id in state_ids:
+        if int(state_id) < 0 or int(state_id) >= td_obj.nstates:
+            raise ValueError('TRANSITION_CHARGE_STATES contains invalid state index')
+        dm_trans = calculate_transition_density_matrix(td_obj, int(state_id))
+        chg = _compute_atomic_charges(method, mol_obj, dm_trans, s1e)
+        np.savetxt(os.path.join(outdir, f'transition_charges_state{int(state_id)+1}_{method}.txt'), chg)
+
+
+def _export_json_summary(mol_obj, mf_obj, td_obj, outdir, label, extra=None):
+    data = {
+        'charge': int(mol_obj.charge),
+        'spin_2S': int(mol_obj.spin),
+        'spin_multiplicity': int(mol_obj.spin) + 1,
+        'ground_state_energy_hartree': float(mf_obj.e_tot),
+        'excited_states': [],
+        'label': str(label),
+    }
+    if extra is not None:
+        data.update(extra)
+
+    hartree_to_ev = 27.211386245988
+    for i in range(td_obj.nstates):
+        tdm = calculate_transition_dipole(td_obj, i)
+        tdm = np.asarray(tdm, dtype=float)
+        omega = float(td_obj.e[i])
+        osc = float((2.0/3.0) * omega * (np.linalg.norm(tdm) ** 2))
+        data['excited_states'].append({
+            'state': int(i + 1),
+            'energy_ev': float(omega * hartree_to_ev),
+            'transition_dipole_au': [float(tdm[0]), float(tdm[1]), float(tdm[2])],
+            'oscillator_strength': osc,
+        })
+
+    with open(os.path.join(outdir, 'aggregate_parameters.json'), 'w') as f:
+        json.dump(data, f, indent=4)
+
+
+def _finite_field_polarizability(mol_obj, outdir, field_strength_au, include_qmmm, mm_coords, mm_charges):
+    charges = mol_obj.atom_charges()
+    coords = mol_obj.atom_coords()
+    nuc_center = np.einsum('z,zx->x', charges, coords) / charges.sum()
+    mol_obj.set_common_orig_(nuc_center)
+    dip_ints = mol_obj.intor('int1e_r', comp=3)
+
+    pol = np.zeros((3, 3), dtype=float)
+    for k in range(3):
+        mu_plus = None
+        mu_minus = None
+
+        for sign in (+1.0, -1.0):
+            mf_field = build_mf(mol_obj)
+            if include_qmmm:
+                mf_field = _apply_mm_embedding(mf_field, mol_obj, mm_coords, mm_charges, QMMM_UNIT)
+            orig_get_hcore = mf_field.get_hcore
+
+            def get_hcore_with_field(*args, **kwargs):
+                hcore = orig_get_hcore(*args, **kwargs)
+                if hasattr(hcore, 'get'):
+                    hcore = cp.asarray(hcore, dtype=cp.float64)
+                else:
+                    hcore = cp.asarray(np.asarray(hcore, dtype=np.float64), dtype=cp.float64)
+                return hcore + (sign * float(field_strength_au)) * cp.asarray(dip_ints[k], dtype=cp.float64)
+
+            mf_field.get_hcore = get_hcore_with_field
+            mf_field.kernel()
+            dm_tot = _dm_total_from_mf(mf_field)
+            mu = np.asarray(hf.dip_moment(mol_obj, dm_tot, unit='AU', origin=nuc_center, verbose=0), dtype=float)
+            if sign > 0:
+                mu_plus = mu
+            else:
+                mu_minus = mu
+
+        pol[:, k] = (mu_plus - mu_minus) / (2.0 * float(field_strength_au))
+
+    np.savetxt(os.path.join(outdir, 'polarizability_tensor.txt'), pol)
+    return pol
 
 
 def run_cdft_secant(mf, mol):
@@ -704,7 +964,21 @@ if ENABLE_DFT:
     print(f"Method: {dft_method}")
     print("-"*70)
 
+    mf_isolated = None
+    if ENABLE_QMMM_EMBEDDING and QMMM_RUN_ISOLATED_AND_EMBEDDED:
+        mf_isolated = build_mf(mol)
+        if EXPORT_CHECKPOINT:
+            mf_isolated.chkfile = os.path.join(OUTPUT_DIR, 'system_isolated.chk')
+        if ENABLE_CDFT:
+            run_cdft_secant(mf_isolated, mol)
+        else:
+            mf_isolated.kernel()
+
     mf = build_mf(mol)
+    if EXPORT_CHECKPOINT:
+        mf.chkfile = os.path.join(OUTPUT_DIR, 'system.chk')
+    if ENABLE_QMMM_EMBEDDING:
+        mf = _apply_mm_embedding(mf, mol, qmmm_mm_coords, qmmm_mm_charges, QMMM_UNIT)
 
     if ENABLE_CDFT:
         run_cdft_secant(mf, mol)
@@ -722,6 +996,18 @@ if ENABLE_DFT:
         print(f"✓ Ground-state energy: {mf.e_tot:.8f} a.u.")
     else:
         print(f"✓ Ground-state energy: {mf.e_tot:.6f} a.u.")
+
+    if EXPORT_QM_MATRICES:
+        _export_qm_matrices(mol, mf, OUTPUT_DIR)
+
+    if EXPORT_GS_ATOMIC_CHARGES:
+        dm_total = _dm_total_from_mf(mf)
+        s1e = mol.intor('int1e_ovlp')
+        chg = _compute_atomic_charges(GS_CHARGES_METHOD, mol, dm_total, s1e)
+        np.savetxt(os.path.join(OUTPUT_DIR, f'ground_state_charges_{GS_CHARGES_METHOD}.txt'), chg)
+
+    if EXPORT_POLARIZABILITY:
+        _finite_field_polarizability(mol, OUTPUT_DIR, FINITE_FIELD_STRENGTH_AU, ENABLE_QMMM_EMBEDDING, qmmm_mm_coords, qmmm_mm_charges)
 
 # # ============================================================================
 # # 2. GROUND STATE DFT CALCULATION
@@ -1045,6 +1331,30 @@ for i, energy in enumerate(td.e):
     else:
         print(f"State S{i+1}: {energy:.6f} a.u. = {energy*27.211:.3f} eV")
 print("="*70)
+
+td_isolated = None
+qmmm_shift_data = None
+if ENABLE_QMMM_EMBEDDING and QMMM_RUN_ISOLATED_AND_EMBEDDED and mf_isolated is not None:
+    print("\n" + "="*70)
+    print("QM/MM SHIFT: ISOLATED REFERENCE TDDFT")
+    print("="*70)
+    if actual_spin == 1:
+        td_isolated = gpu_tdrks.TDA(mf_isolated) if USE_TDA else gpu_tdrks.TDDFT(mf_isolated)
+    else:
+        td_isolated = gpu_tduks.TDA(mf_isolated) if USE_TDA else gpu_tduks.TDDFT(mf_isolated)
+    td_isolated.nstates = NUM_EXCITED_STATES
+    td_isolated.verbose = 0
+    td_isolated.max_cycle = td.max_cycle
+    td_isolated.conv_tol = td.conv_tol
+    td_isolated.kernel()
+
+    hartree_to_ev = 27.211386245988
+    gs_shift = float(mf.e_tot - mf_isolated.e_tot)
+    exc_shifts_ev = [float((td.e[i] - td_isolated.e[i]) * hartree_to_ev) for i in range(min(td.nstates, td_isolated.nstates))]
+    qmmm_shift_data = {
+        'ground_state_energy_shift_hartree': gs_shift,
+        'excitation_energy_shifts_ev': exc_shifts_ev,
+    }
 
 # Store ground state total energy for emission calculation
 ground_state_energy_gs_geom = mf.e_tot
@@ -1484,6 +1794,25 @@ for i in range(td.nstates):
     
     print(f"{i+1:<8} {tdm[0]:>11.6f} {tdm[1]:>11.6f} {tdm[2]:>11.6f} "
           f"{tdm_magnitude:>11.6f} {osc_strength:>11.6f}")
+
+if EXPORT_JSON_SUMMARY:
+    label = 'qmmm_embedded' if ENABLE_QMMM_EMBEDDING else 'isolated'
+    _export_json_summary(mol, mf, td, OUTPUT_DIR, label, extra=qmmm_shift_data)
+
+if EXPORT_TRANSITION_CHARGES:
+    _export_transition_charges(td, mol, TRANSITION_CHARGES_METHOD, TRANSITION_CHARGE_STATES, OUTPUT_DIR)
+
+if ENABLE_QMMM_EMBEDDING and QMMM_RUN_ISOLATED_AND_EMBEDDED and QMMM_EXPORT_SHIFT_JSON and qmmm_shift_data is not None:
+    if td_isolated is not None:
+        tdm_shifts = []
+        for i in range(min(td.nstates, td_isolated.nstates)):
+            tdm_emb = np.asarray(calculate_transition_dipole(td, i), dtype=float)
+            tdm_iso = np.asarray(calculate_transition_dipole(td_isolated, i), dtype=float)
+            tdm_shifts.append([float(x) for x in (tdm_emb - tdm_iso)])
+        qmmm_shift_data['transition_dipole_shifts_au'] = tdm_shifts
+
+    with open(os.path.join(OUTPUT_DIR, 'qmmm_shift_summary.json'), 'w') as f:
+        json.dump(qmmm_shift_data, f, indent=4)
 
 # EMISSION TDMs: at excited state geometry (if emission calculation was done)
 if td_emission is not None:

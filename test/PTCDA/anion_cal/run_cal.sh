@@ -32,10 +32,10 @@ ENABLE_TDDFT=True               # Run TDDFT excited state calculation
 # ============================================================================
 USE_XYZ=True                    # True: use XYZ file, False: use built-in H2O test
 # XYZ_FILE="PTCDA_clean.xyz"      # Path to XYZ file (relative or absolute)
-XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"     # PTCDA Neutral optimised structure
+# XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"     # PTCDA Neutral optimised structure
 # XYZ_FILE="emission/optimised_structure_wb97x_d3bj_6_31g__gpu_charge0/optimised_structure.xyz"
 # XYZ_FILE="emission/charge-1_s1_opt/optimised_structure.xyz"     # PTCDA Anion optimised structure
-# XYZ_FILE="/home/indranil/Documents/Secondment/test/PTCDA/anion_cal/opt/charge-1/wb97x_d3bj/ptcda_anion_dimer_T_from_molecules_ini.xyz"
+XYZ_FILE="/home/indranil/Documents/Secondment/test/PTCDA/anion_cal/opt/charge-1/wb97x_d3bj/ptcda_anion_dimer_T_from_molecules_ini.xyz"
 # XYZ_FILE="azulene.xyz"
 # XYZ_FILE="azulene_-1_opt.xyz"
 
@@ -45,7 +45,7 @@ XYZ_FILE="opt/charge0/wb97x_d3bj/optimised_structure.xyz"     # PTCDA Neutral op
 # --- Charge and Spin ---
 # CHARGE="-2"                    # Molecular charge: 0, +1, -1, or batch "0 1 -1"
 # SPIN=3                          # Spin multiplicity: 3=triplet for dianion (2 unpaired e-)
-CHARGE="0"
+CHARGE="-1"
 SPIN=None
 
 # --- Constrained DFT (cDFT) ---
@@ -53,20 +53,21 @@ SPIN=None
 # Notes on functional/basis choices for charge-transfer and cDFT-style constraints:
 # - Best practice (often): range-separated hybrids like wb97x, cam-b3lyp for CT states.
 # - Basis: include diffuse functions for anions/CT: def2-SVPD/def2-TZVPPD/def2-QZVPPD.
-ENABLE_CDFT=False
+ENABLE_CDFT=True
+TARGET_CHARGE_A=-1.0
 # 0-indexed atom indices belonging to Monomer A (space-separated). Example: "0 1 2 3 4"
-MONOMER_A_ATOMS=""
+MONOMER_A_ATOMS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37"
 # Target charge on Monomer A. Example: -1 enforces one extra electron on fragment A.
-TARGET_CHARGE_A=0.0
+TARGET_CHARGE_A=-1.0
 # Secant initial guesses for constraint multiplier Vc
 CDFT_VC_X0=0.0
 CDFT_VC_X1=0.1
 # Convergence and iteration limits
 CDFT_CHARGE_TOL=1e-4
-CDFT_MAX_ITER=25
+CDFT_MAX_ITER=250
 
 # --- Basis Set ---
-BASIS_SET="def2-TZVPPD"              # Options: 6-31g, 6-31g*, 6-311g**, def2-SVP, def2-TZVP, def2-SVPD, def2-QZVPPD 
+BASIS_SET="6-31g*"              # Options: 6-31g, 6-31g*, 6-311g**, def2-SVP, def2-TZVP, def2-SVPD, def2-QZVPPD 
 
 # --- DFT Functional ---
 # Supported dispersion: -d3bj, -d3zero, -d3bjm, -d3zerom, -d3op, -d4
@@ -76,7 +77,7 @@ XC_FUNCTIONAL="wb97x-d3bj"      # Examples: b3lyp, pbe0, cam-b3lyp, wb97x-d3bj
 # ============================================================================
 #                    SECTION 4: GEOMETRY OPTIMIZATION
 # ============================================================================
-OPTIMISE_GEOMETRY=True           # True: optimize geometry, False: use input as-is
+OPTIMISE_GEOMETRY=False           # True: optimize geometry, False: use input as-is
 OPT_CYCLES=5                    # Number of optimization cycles (output N → input N+1)
 OPT_MAX_STEPS=150               # Max steps per optimization cycle
 OPT_CONV_PARAMS="tight"         # Convergence: "tight", "normal", "loose"
@@ -126,6 +127,29 @@ GENERATE_PAIR_CUBES=True                # Generate cube files for orbital pairs
 MAX_PAIRS_PER_STATE=3                   # Max cubes per state
 PAIR_CONTRIBUTION_CUTOFF=0.05           # Only pairs > 5%
 
+# --- QM/MM Background Charge Embedding (point charges) ---
+ENABLE_QMMM_EMBEDDING=False
+QMMM_RUN_ISOLATED_AND_EMBEDDED=False
+QMMM_MODE="from_file"                  # from_file | from_dimer_xyz
+QMMM_UNIT="Angstrom"                   # Angstrom | Bohr
+QMMM_QM_ATOMS=""                        # 0-indexed atom indices for QM region (space-separated)
+QMMM_MM_ATOMS=""                        # Optional explicit MM atom indices (space-separated)
+QMMM_MM_COORDS_CHARGES_FILE=""          # Path to file with 4 columns: x y z q (Angstrom/e)
+QMMM_MM_CHARGE_FILE=""                  # Path to file with charges (one per MM atom) for from_dimer_xyz mode
+QMMM_EXPORT_SHIFT_JSON=True
+
+# --- Machine-readable exports for aggregate model ---
+EXPORT_JSON_SUMMARY=True
+EXPORT_QM_MATRICES=True
+EXPORT_CHECKPOINT=True
+EXPORT_GS_ATOMIC_CHARGES=True
+GS_CHARGES_METHOD="mulliken"            # mulliken | meta_lowdin
+EXPORT_TRANSITION_CHARGES=True
+TRANSITION_CHARGE_STATES="0"            # 0-indexed states for transition charges
+TRANSITION_CHARGES_METHOD="mulliken"    # mulliken | meta_lowdin
+EXPORT_POLARIZABILITY=True
+FINITE_FIELD_STRENGTH_AU=1e-4
+
 # ============================================================================
 #                    SECTION 7: GRID SETTINGS (for cube files)
 # ============================================================================
@@ -133,8 +157,8 @@ USE_GRID_RESOLUTION=False       # True: fixed resolution, False: use spacing
 GRID_RESOLUTION_X=80            # Grid points in X (if USE_GRID_RESOLUTION=True)
 GRID_RESOLUTION_Y=80            # Grid points in Y
 GRID_RESOLUTION_Z=80            # Grid points in Z
-BOX_MARGIN=15                  # Margin around molecule (Angstrom)
-GRID_SPACING=0.15                # Grid spacing (Angstrom) - fine grid for accurate integration
+BOX_MARGIN=4                  # Margin around molecule (Angstrom)
+GRID_SPACING=0.2                # Grid spacing (Angstrom) - fine grid for accurate integration
 
 # ============================================================================
 #                    SECTION 8: EXECUTION SETTINGS
@@ -146,7 +170,7 @@ USE_GPU=True                    # True: GPU (faster), False: CPU
 NUM_THREADS=0                   # CPU threads (0=auto-detect)
 
 # --- Verbosity ---
-VERBOSE_LEVEL=4                 # 0: minimal, 1: normal, 2: detailed, 3: debug, 4: max
+VERBOSE_LEVEL=3                 # 0: minimal, 1: normal, 2: detailed, 3: debug, 4: max
 
 # --- Output Control ---
 LOG_FILE="calculation.log"      # Log file name
@@ -281,6 +305,24 @@ updates = {
     'GENERATE_GROUND_STATE_DENSITY': '${GENERATE_GROUND_STATE_DENSITY}',
     'GENERATE_ELECTROSTATIC_POTENTIAL': '${GENERATE_ELECTROSTATIC_POTENTIAL}',
     'GENERATE_DEFORMATION_DENSITY': '${GENERATE_DEFORMATION_DENSITY}',
+    # QM/MM embedding
+    'ENABLE_QMMM_EMBEDDING': '${ENABLE_QMMM_EMBEDDING}',
+    'QMMM_RUN_ISOLATED_AND_EMBEDDED': '${QMMM_RUN_ISOLATED_AND_EMBEDDED}',
+    'QMMM_MODE': "'${QMMM_MODE}'",
+    'QMMM_UNIT': "'${QMMM_UNIT}'",
+    'QMMM_MM_COORDS_CHARGES_FILE': "'${QMMM_MM_COORDS_CHARGES_FILE}'",
+    'QMMM_MM_CHARGE_FILE': "'${QMMM_MM_CHARGE_FILE}'",
+    'QMMM_EXPORT_SHIFT_JSON': '${QMMM_EXPORT_SHIFT_JSON}',
+    # Exports
+    'EXPORT_JSON_SUMMARY': '${EXPORT_JSON_SUMMARY}',
+    'EXPORT_QM_MATRICES': '${EXPORT_QM_MATRICES}',
+    'EXPORT_CHECKPOINT': '${EXPORT_CHECKPOINT}',
+    'EXPORT_GS_ATOMIC_CHARGES': '${EXPORT_GS_ATOMIC_CHARGES}',
+    'GS_CHARGES_METHOD': "'${GS_CHARGES_METHOD}'",
+    'EXPORT_TRANSITION_CHARGES': '${EXPORT_TRANSITION_CHARGES}',
+    'TRANSITION_CHARGES_METHOD': "'${TRANSITION_CHARGES_METHOD}'",
+    'EXPORT_POLARIZABILITY': '${EXPORT_POLARIZABILITY}',
+    'FINITE_FIELD_STRENGTH_AU': '${FINITE_FIELD_STRENGTH_AU}',
     # Section 7: Grid Settings
     'USE_GRID_RESOLUTION': '${USE_GRID_RESOLUTION}',
     'BOX_MARGIN': '${BOX_MARGIN}',
@@ -303,6 +345,9 @@ list_configs = {
     'NTO_STATES': '${NTO_STATES}',
     'CONTRIBUTION_STATES': '${CONTRIBUTION_STATES}',
     'MONOMER_A_ATOMS': '${MONOMER_A_ATOMS}',
+    'QMMM_QM_ATOMS': '${QMMM_QM_ATOMS}',
+    'QMMM_MM_ATOMS': '${QMMM_MM_ATOMS}',
+    'TRANSITION_CHARGE_STATES': '${TRANSITION_CHARGE_STATES}',
 }
 
 for key, value in list_configs.items():
