@@ -195,8 +195,8 @@ ENABLE_CDFT = True
 MONOMER_A_ATOMS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
 TARGET_CHARGE_A = -1.0
 CDFT_VC_X0 = 0.0
-CDFT_VC_X1 = 0.1
-CDFT_CHARGE_TOL = 1e-4
+CDFT_VC_X1 = 0.01
+CDFT_CHARGE_TOL = 1e-3
 CDFT_MAX_ITER = 250
 
 # --- DFT/TDDFT Settings ---
@@ -319,7 +319,7 @@ EXPORT_CHECKPOINT = False
 EXPORT_GS_ATOMIC_CHARGES = False
 GS_CHARGES_METHOD = 'mulliken'
 EXPORT_TRANSITION_CHARGES = False
-TRANSITION_CHARGE_STATES = []
+TRANSITION_CHARGE_STATES = [0]
 TRANSITION_CHARGES_METHOD = 'mulliken'
 EXPORT_POLARIZABILITY = False
 FINITE_FIELD_STRENGTH_AU = 1e-4
@@ -679,6 +679,10 @@ def _apply_mm_embedding(mf_obj, mol_obj, mm_coords, mm_charges, unit):
 
 
 def _compute_atomic_charges(method, mol_obj, dm_ao, s1e):
+    if isinstance(dm_ao, tuple):
+        dm_ao = dm_ao[0] + dm_ao[1]
+    if hasattr(dm_ao, 'ndim') and dm_ao.ndim == 3 and dm_ao.shape[0] == 2:
+        dm_ao = dm_ao[0] + dm_ao[1]
     if method == 'mulliken':
         _, chg = hf.mulliken_pop(mol_obj, dm_ao, s=s1e, verbose=0)
         return chg
@@ -741,11 +745,14 @@ def _export_transition_charges(td_obj, mol_obj, method, state_ids, outdir):
         dm_trans = calculate_transition_density_matrix(td_obj, int(state_id))
         chg = _compute_atomic_charges(method, mol_obj, dm_trans, s1e)
         np.savetxt(os.path.join(outdir, f'transition_charges_state{int(state_id)+1}_{method}.txt'), chg)
+        if method == 'mulliken':
+            np.savetxt(os.path.join(outdir, f'transition_charges_S{int(state_id)+1}.txt'), chg)
 
 
 def _export_json_summary(mol_obj, mf_obj, td_obj, outdir, label, extra=None):
     data = {
         'charge': int(mol_obj.charge),
+        'spin': int(mol_obj.spin) + 1,
         'spin_2S': int(mol_obj.spin),
         'spin_multiplicity': int(mol_obj.spin) + 1,
         'ground_state_energy_hartree': float(mf_obj.e_tot),
@@ -1005,6 +1012,8 @@ if ENABLE_DFT:
         s1e = mol.intor('int1e_ovlp')
         chg = _compute_atomic_charges(GS_CHARGES_METHOD, mol, dm_total, s1e)
         np.savetxt(os.path.join(OUTPUT_DIR, f'ground_state_charges_{GS_CHARGES_METHOD}.txt'), chg)
+        if GS_CHARGES_METHOD == 'mulliken':
+            np.savetxt(os.path.join(OUTPUT_DIR, 'ground_state_mulliken_charges.txt'), chg)
 
     if EXPORT_POLARIZABILITY:
         _finite_field_polarizability(mol, OUTPUT_DIR, FINITE_FIELD_STRENGTH_AU, ENABLE_QMMM_EMBEDDING, qmmm_mm_coords, qmmm_mm_charges)
@@ -1774,6 +1783,13 @@ def calculate_transition_dipole(td, state_id):
     # Calculate transition dipole: μ = Tr(μ_op * T)
     tdm = np.einsum('xij,ji->x', dip_ints, t_dm1_ao)
     
+    # For RKS, multiply by 2 for spin degeneracy (both alpha and beta contribute identically)
+    # This matches PySCF's official _contract_multipole in rhf.py which has an explicit *2.
+    # For UKS, each spin is already counted separately (no extra factor needed),
+    # matching PySCF's uhf.py _contract_multipole which has no *2.
+    if not is_uks:
+        tdm *= 2
+    
     return tdm
 
 # Calculate and print transition dipoles for all states
@@ -1798,9 +1814,6 @@ for i in range(td.nstates):
 if EXPORT_JSON_SUMMARY:
     label = 'qmmm_embedded' if ENABLE_QMMM_EMBEDDING else 'isolated'
     _export_json_summary(mol, mf, td, OUTPUT_DIR, label, extra=qmmm_shift_data)
-
-if EXPORT_TRANSITION_CHARGES:
-    _export_transition_charges(td, mol, TRANSITION_CHARGES_METHOD, TRANSITION_CHARGE_STATES, OUTPUT_DIR)
 
 if ENABLE_QMMM_EMBEDDING and QMMM_RUN_ISOLATED_AND_EMBEDDED and QMMM_EXPORT_SHIFT_JSON and qmmm_shift_data is not None:
     if td_isolated is not None:
@@ -1887,7 +1900,14 @@ if td_emission is not None:
             t_dm1_mo[:nocc, nocc:] = X.reshape(nocc, nvir) if is_tda else (X + Y).reshape(nocc, nvir)
             t_dm1_ao = reduce(np.dot, (mo_coeff, t_dm1_mo, mo_coeff.T))
         
-        return np.einsum('xij,ji->x', dip_ints_em, t_dm1_ao)
+        tdm_em = np.einsum('xij,ji->x', dip_ints_em, t_dm1_ao)
+
+        # For RKS, multiply by 2 for spin degeneracy (matching PySCF rhf.py).
+        # For UKS, no extra factor (matching PySCF uhf.py).
+        if not is_uks:
+            tdm_em *= 2
+
+        return tdm_em
     
     print(f"\n{'State':<8} {'μ_x':<12} {'μ_y':<12} {'μ_z':<12} {'|μ|':<12} {'f':<12}")
     print("-" * 70)
@@ -2000,6 +2020,9 @@ def calculate_transition_density_matrix(td, state_id):
         t_dm1_ao = reduce(np.dot, (mo_coeff, t_dm1_mo, mo_coeff.T))
     
     return t_dm1_ao
+
+if EXPORT_TRANSITION_CHARGES:
+    _export_transition_charges(td, mol, TRANSITION_CHARGES_METHOD, TRANSITION_CHARGE_STATES, OUTPUT_DIR)
 
 def calculate_excited_state_density(td, state_id):
     """

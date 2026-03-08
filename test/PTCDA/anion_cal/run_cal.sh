@@ -61,9 +61,9 @@ MONOMER_A_ATOMS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 2
 TARGET_CHARGE_A=-1.0
 # Secant initial guesses for constraint multiplier Vc
 CDFT_VC_X0=0.0
-CDFT_VC_X1=0.1
+CDFT_VC_X1=0.01
 # Convergence and iteration limits
-CDFT_CHARGE_TOL=1e-4
+CDFT_CHARGE_TOL=1e-3
 CDFT_MAX_ITER=250
 
 # --- Basis Set ---
@@ -139,15 +139,15 @@ QMMM_MM_CHARGE_FILE=""                  # Path to file with charges (one per MM 
 QMMM_EXPORT_SHIFT_JSON=True
 
 # --- Machine-readable exports for aggregate model ---
-EXPORT_JSON_SUMMARY=True
-EXPORT_QM_MATRICES=True
-EXPORT_CHECKPOINT=True
-EXPORT_GS_ATOMIC_CHARGES=True
+EXPORT_JSON_SUMMARY=False
+EXPORT_QM_MATRICES=False
+EXPORT_CHECKPOINT=False
+EXPORT_GS_ATOMIC_CHARGES=False
 GS_CHARGES_METHOD="mulliken"            # mulliken | meta_lowdin
-EXPORT_TRANSITION_CHARGES=True
+EXPORT_TRANSITION_CHARGES=False
 TRANSITION_CHARGE_STATES="0"            # 0-indexed states for transition charges
 TRANSITION_CHARGES_METHOD="mulliken"    # mulliken | meta_lowdin
-EXPORT_POLARIZABILITY=True
+EXPORT_POLARIZABILITY=False
 FINITE_FIELD_STRENGTH_AU=1e-4
 
 # ============================================================================

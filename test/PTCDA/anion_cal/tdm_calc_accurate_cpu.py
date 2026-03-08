@@ -522,6 +522,10 @@ def _apply_mm_embedding(mf_obj, mol_obj, mm_coords, mm_charges, unit):
 
 
 def _compute_atomic_charges(method, mol_obj, dm_ao, s1e):
+    if isinstance(dm_ao, tuple):
+        dm_ao = dm_ao[0] + dm_ao[1]
+    if hasattr(dm_ao, 'ndim') and dm_ao.ndim == 3 and dm_ao.shape[0] == 2:
+        dm_ao = dm_ao[0] + dm_ao[1]
     if method == 'mulliken':
         _, chg = hf.mulliken_pop(mol_obj, dm_ao, s=s1e, verbose=0)
         return chg
@@ -561,6 +565,7 @@ def _export_qm_matrices(mol_obj, mf_obj, outdir):
 def _export_json_summary(mol_obj, mf_obj, td_obj, outdir, label, extra=None):
     data = {
         'charge': int(mol_obj.charge),
+        'spin': int(mol_obj.spin) + 1,
         'spin_2S': int(mol_obj.spin),
         'spin_multiplicity': int(mol_obj.spin) + 1,
         'ground_state_energy_hartree': float(mf_obj.e_tot),
@@ -595,6 +600,8 @@ def _export_transition_charges(td_obj, mol_obj, method, state_ids, outdir):
         dm_trans = calculate_transition_density_matrix(td_obj, int(state_id))
         chg = _compute_atomic_charges(method, mol_obj, dm_trans, s1e)
         np.savetxt(os.path.join(outdir, f'transition_charges_state{int(state_id)+1}_{method}.txt'), chg)
+        if method == 'mulliken':
+            np.savetxt(os.path.join(outdir, f'transition_charges_S{int(state_id)+1}.txt'), chg)
 
 
 def _finite_field_polarizability(mol_obj, outdir, field_strength_au, include_qmmm, mm_coords, mm_charges):
@@ -821,6 +828,8 @@ if ENABLE_DFT:
         s1e = mol.intor('int1e_ovlp')
         chg = _compute_atomic_charges(GS_CHARGES_METHOD, mol, dm_total, s1e)
         np.savetxt(os.path.join(OUTPUT_DIR, f'ground_state_charges_{GS_CHARGES_METHOD}.txt'), chg)
+        if GS_CHARGES_METHOD == 'mulliken':
+            np.savetxt(os.path.join(OUTPUT_DIR, 'ground_state_mulliken_charges.txt'), chg)
 
     if EXPORT_POLARIZABILITY:
         _finite_field_polarizability(mol, OUTPUT_DIR, FINITE_FIELD_STRENGTH_AU, ENABLE_QMMM_EMBEDDING, qmmm_mm_coords, qmmm_mm_charges)
@@ -1384,6 +1393,13 @@ def calculate_transition_dipole(td, state_id):
     # Calculate transition dipole: μ = Tr(μ_op * T)
     tdm = np.einsum('xij,ji->x', dip_ints, t_dm1_ao)
     
+    # For RKS, multiply by 2 for spin degeneracy (both alpha and beta contribute identically)
+    # This matches PySCF's official _contract_multipole in rhf.py which has an explicit *2.
+    # For UKS, each spin is already counted separately (no extra factor needed),
+    # matching PySCF's uhf.py _contract_multipole which has no *2.
+    if not is_uks:
+        tdm *= 2
+    
     return tdm
 
 def calculate_transition_dipole_with_ints(td_obj, state_id, dip_ints_use):
@@ -1430,6 +1446,12 @@ def calculate_transition_dipole_with_ints(td_obj, state_id, dip_ints_use):
         t_dm1_ao = reduce(np.dot, (mo_coeff, t_dm1_mo, mo_coeff.T))
 
     tdm_ao = np.einsum('xij,ji->x', dip_ints_use, t_dm1_ao)
+
+    # For RKS, multiply by 2 for spin degeneracy (matching PySCF rhf.py _contract_multipole).
+    # For UKS, no extra factor (matching PySCF uhf.py _contract_multipole).
+    if not is_uks:
+        tdm_ao *= 2
+
     return tdm_ao, float(np.linalg.norm(tdm_ao))
 
 
@@ -1453,9 +1475,6 @@ for i in range(td.nstates):
 if EXPORT_JSON_SUMMARY:
     label = 'qmmm_embedded' if ENABLE_QMMM_EMBEDDING else 'isolated'
     _export_json_summary(mol, mf, td, OUTPUT_DIR, label, extra=qmmm_shift_data)
-
-if EXPORT_TRANSITION_CHARGES:
-    _export_transition_charges(td, mol, TRANSITION_CHARGES_METHOD, TRANSITION_CHARGE_STATES, OUTPUT_DIR)
 
 if ENABLE_QMMM_EMBEDDING and QMMM_RUN_ISOLATED_AND_EMBEDDED and QMMM_EXPORT_SHIFT_JSON and qmmm_shift_data is not None:
     if td_isolated is not None:
@@ -1566,6 +1585,9 @@ def calculate_transition_density_matrix(td, state_id):
         t_dm1_ao = reduce(np.dot, (mo_coeff, t_dm1_mo, mo_coeff.T))
     
     return t_dm1_ao
+
+if EXPORT_TRANSITION_CHARGES:
+    _export_transition_charges(td, mol, TRANSITION_CHARGES_METHOD, TRANSITION_CHARGE_STATES, OUTPUT_DIR)
 
 def calculate_excited_state_density(td, state_id):
     """
@@ -2002,9 +2024,11 @@ else:
 
 if ENABLE_CONTRIBUTION_ANALYSIS:
     print("\n" + "="*70)
-    print("TRANSITION CONTRIBUTION ANALYSIS")
+    print("ABSORPTION TRANSITION CONTRIBUTION ANALYSIS")
     print("="*70)
-    print("Analyzing orbital pair contributions to excited states...")
+    print("Analyzing orbital contributions at GROUND STATE GEOMETRY")
+    print("These correspond to excitation (absorption) transitions S\u2080 \u2192 S\u2099")
+    print("-"*70)
     
     # Filter valid states
     valid_contrib_states = [s for s in CONTRIBUTION_STATES if s < td.nstates]
@@ -2029,7 +2053,7 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
             
             # Print contribution table with orbital indices and energies
             print(f"\n{'='*100}")
-            print(f"STATE {state_id+1}: {excitation_energy:.4f} eV")
+            print(f"ABSORPTION STATE {state_id+1}: {excitation_energy:.4f} eV")
             print(f"{'='*100}")
             print(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}")
             print(f"{'-'*100}")
@@ -2052,10 +2076,11 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
             print(f"      ΔE = single-particle energy gap (Kohn-Sham), not excitation energy")
         
         # Save contribution tables to file (with orbital indices and energies)
-        table_file = os.path.join(OUTPUT_DIR, 'contribution_tables.txt')
+        table_file = os.path.join(OUTPUT_DIR, 'absorption_contribution_tables.txt')
         with open(table_file, 'w') as f:
             f.write("="*100 + "\n")
-            f.write("ORBITAL PAIR CONTRIBUTIONS TO EXCITED STATES\n")
+            f.write("ABSORPTION ORBITAL PAIR CONTRIBUTIONS (at ground state geometry)\n")
+            f.write("These contributions describe the excitation transitions S\u2080 \u2192 S\u2099\n")
             f.write("="*100 + "\n\n")
             
             for state_id in valid_contrib_states:
@@ -2063,7 +2088,7 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
                 excitation_energy = td.e[state_id] * 27.211
                 
                 f.write(f"\n{'='*100}\n")
-                f.write(f"STATE {state_id+1}: {excitation_energy:.4f} eV\n")
+                f.write(f"ABSORPTION STATE {state_id+1}: {excitation_energy:.4f} eV\n")
                 f.write(f"{'='*100}\n")
                 f.write(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}\n")
                 f.write(f"{'-'*100}\n")
@@ -2084,7 +2109,86 @@ if ENABLE_CONTRIBUTION_ANALYSIS:
                 f.write(f"      ΔE = single-particle gap (Kohn-Sham), Contributions = (amplitude)²\n")
                 f.write(f"{'='*100}\n\n")
         
-        print(f"\n✓ Contribution tables saved to: {table_file}")
+        print(f"\n\u2713 Absorption contribution tables saved to: {table_file}")
+
+        # =====================================================================
+        # EMISSION CONTRIBUTION ANALYSIS (at excited state geometry)
+        # =====================================================================
+        if td_emission is not None:
+            print("\n" + "="*70)
+            print("EMISSION TRANSITION CONTRIBUTION ANALYSIS")
+            print("="*70)
+            print("Analyzing orbital contributions at EXCITED STATE GEOMETRY")
+            print("These correspond to de-excitation (emission) transitions S\u2099 \u2192 S\u2080")
+            print("-"*70)
+
+            mf_em_cpu = td_emission._scf
+            valid_emission_states = [s for s in CONTRIBUTION_STATES if s < td_emission.nstates]
+            all_emission_contributions = {}
+
+            for state_id in valid_emission_states:
+                emission_energy = td_emission.e[state_id] * 27.211
+                contributions, total_weight = analyze_transition_contributions(
+                    td_emission, state_id, mf_em_cpu,
+                    threshold=CONTRIBUTION_THRESHOLD,
+                    top_n=TOP_N_CONTRIBUTIONS
+                )
+
+                all_emission_contributions[state_id] = (contributions, total_weight)
+
+                print(f"\n{'='*100}")
+                print(f"EMISSION STATE {state_id+1}: {emission_energy:.4f} eV")
+                print(f"{'='*100}")
+                print(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}")
+                print(f"{'-'*100}")
+
+                cumulative = 0.0
+                for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
+                    cumulative += weight
+                    idx_str = f"{occ_idx}→{vir_idx}"
+                    delta_e = (vir_e - occ_e) if (occ_e is not None and vir_e is not None) else 0.0
+                    occ_e_str = f"{occ_e:.3f}" if occ_e is not None else "N/A"
+                    vir_e_str = f"{vir_e:.3f}" if vir_e is not None else "N/A"
+                    delta_e_str = f"{delta_e:.3f}" if (occ_e is not None and vir_e is not None) else "N/A"
+                    print(f"{rank:<5} {idx_str:<8} {label:<28} {occ_e_str:<12} {vir_e_str:<12} {delta_e_str:<10} {weight:<10.4f} {weight*100:<7.2f}%")
+
+                print(f"{'-'*100}")
+                print(f"Total weight analyzed: {total_weight:.6f}")
+
+            emission_table_file = os.path.join(OUTPUT_DIR, 'emission_contribution_tables.txt')
+            with open(emission_table_file, 'w') as f:
+                f.write("="*100 + "\n")
+                f.write("EMISSION ORBITAL PAIR CONTRIBUTIONS (at excited state geometry)\n")
+                f.write("These contributions describe the de-excitation transitions S\u2099 \u2192 S\u2080\n")
+                f.write("="*100 + "\n\n")
+
+                for state_id in valid_emission_states:
+                    contributions, total_weight = all_emission_contributions[state_id]
+                    emission_energy = td_emission.e[state_id] * 27.211
+
+                    f.write(f"\n{'='*100}\n")
+                    f.write(f"EMISSION STATE {state_id+1}: {emission_energy:.4f} eV\n")
+                    f.write(f"{'='*100}\n")
+                    f.write(f"{'Rank':<5} {'Idx':<8} {'Transition':<28} {'Occ E(eV)':<12} {'Vir E(eV)':<12} {'ΔE(eV)':<10} {'Weight':<10} {'%':<8}\n")
+                    f.write(f"{'-'*100}\n")
+
+                    cumulative = 0.0
+                    for rank, (occ_idx, vir_idx, weight, label, spin, occ_e, vir_e) in enumerate(contributions, 1):
+                        cumulative += weight
+                        idx_str = f"{occ_idx}→{vir_idx}"
+                        delta_e = (vir_e - occ_e) if (occ_e is not None and vir_e is not None) else 0.0
+                        occ_e_str = f"{occ_e:.3f}" if occ_e is not None else "N/A"
+                        vir_e_str = f"{vir_e:.3f}" if vir_e is not None else "N/A"
+                        delta_e_str = f"{delta_e:.3f}" if (occ_e is not None and vir_e is not None) else "N/A"
+                        f.write(f"{rank:<5} {idx_str:<8} {label:<28} {occ_e_str:<12} {vir_e_str:<12} {delta_e_str:<10} {weight:<10.4f} {weight*100:<7.2f}%\n")
+
+                    f.write(f"{'-'*100}\n")
+                    f.write(f"Total weight analyzed: {total_weight:.6f}\n")
+                    f.write(f"Note: Idx = orbital indices (0-indexed), E = orbital energy in eV\n")
+                    f.write(f"      \u0394E = single-particle gap (Kohn-Sham), Contributions = (amplitude)\u00b2\n")
+                    f.write(f"{'='*100}\n\n")
+
+            print(f"\n\u2713 Emission contribution tables saved to: {emission_table_file}")
         
         # Generate cube files for dominant orbital pairs
         if GENERATE_PAIR_CUBES:
@@ -2393,6 +2497,50 @@ else:
             print("  " + "-"*66)
 
 print("="*70)
+
+# ============================================================================
+# 9B. GENERATE CUBE FILES FOR EMISSION (at excited state geometry)
+# ============================================================================
+
+if td_emission is not None and emission_mol is not None:
+    print("\n" + "="*70)
+    print("GENERATING EMISSION CUBE FILES (at excited state geometry)")
+    print("="*70)
+    print("These represent S\u2099 \u2192 S\u2080 transitions for fluorescence emission")
+    print(f"NOTE: Only S{EMISSION_STATE+1} emission is physically valid (geometry optimized for this state)")
+
+    nx_em, ny_em, nz_em, box_info_em = calculate_grid_parameters(
+        emission_mol,
+        use_resolution=USE_GRID_RESOLUTION,
+        resolution=GRID_RESOLUTION if USE_GRID_RESOLUTION else None,
+        box_margin=BOX_MARGIN,
+        grid_spacing=GRID_SPACING if not USE_GRID_RESOLUTION else None
+    )
+
+    margin_em_bohr = BOX_MARGIN / 0.529177
+    valid_emission_cube_states = [s for s in STATES_TO_OUTPUT if s < td_emission.nstates]
+
+    print(f"Generating emission cube files for states: {[s+1 for s in valid_emission_cube_states]}")
+    print(f"Grid resolution: {nx_em} \u00d7 {ny_em} \u00d7 {nz_em}")
+
+    for state_id in valid_emission_cube_states:
+        emission_energy_ev = td_emission.e[state_id] * 27.211
+        is_optimized_state = (state_id == EMISSION_STATE)
+        validity = "\u2713 VALID" if is_optimized_state else "\u26a0 geometry not optimized for this state"
+
+        print(f"\nEmission State {state_id+1}: {emission_energy_ev:.3f} eV {validity}")
+
+        if GENERATE_TRANSITION_DENSITY:
+            dm_trans_em = calculate_transition_density_matrix(td_emission, state_id)
+            filename_trans_em = os.path.join(OUTPUT_DIR, f'emission_transition_density_state{state_id+1}.cube')
+            cubegen.density(emission_mol, filename_trans_em, dm_trans_em, nx=nx_em, ny=ny_em, nz=nz_em, margin=margin_em_bohr)
+            print(f"  \u2713 Emission transition density: {filename_trans_em}")
+
+    excited_geom_file = os.path.join(OUTPUT_DIR, f'excited_state_S{EMISSION_STATE+1}_geometry.xyz')
+    emission_mol.tofile(excited_geom_file, format='xyz')
+    print(f"\n\u2713 Excited state geometry saved: {excited_geom_file}")
+
+    print("="*70)
 
 # ============================================================================
 # 9A. GENERATE ORBITAL PAIR TRANSITION DENSITY CUBE FILES
